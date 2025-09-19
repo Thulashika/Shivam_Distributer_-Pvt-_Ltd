@@ -1,0 +1,1424 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { Order, OrderStatus, OrderItem, Customer, Product, UserRole, User } from '../../types';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../ui/Card';
+import { Modal } from '../ui/Modal';
+import { Badge } from '../ui/Badge';
+import { COMPANY_DETAILS } from '../../constants';
+import { useData } from '../../contexts/DataContext';
+import { supabase, fetchOrders } from '../../supabaseClient';
+import { useAuth } from '../../contexts/AuthContext';
+
+const formatCurrency = (amount: number, currency: string) => {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2 }).format(amount).replace('$', `${currency} `);
+};
+
+
+// --- Printable Bill Component ---
+interface OrderBillProps {
+  order: Order | null;
+  customer: Customer | undefined;
+  products: Product[];
+  currency: string;
+  chequeBalance?: number;
+  creditBalance?: number;
+}
+
+const OrderBill: React.FC<OrderBillProps> = ({ order, customer, products, currency, chequeBalance, creditBalance }) => {
+  if (!order || !customer) return null;
+  const findProduct = (id: string) => products.find(p => p.id === id);
+  // Use props if provided, else fallback to order object
+  const billChequeBalance = typeof chequeBalance === 'number' ? chequeBalance : (order?.chequeBalance ?? 0);
+  const billCreditBalance = typeof creditBalance === 'number' ? creditBalance : (order?.creditBalance ?? 0);
+  const totalOutstanding = billChequeBalance + billCreditBalance;
+  const amountPaid = order?.total ? order.total - totalOutstanding : 0;
+
+  return (
+    <div className="p-8 font-sans text-gray-800">
+      <header className="flex justify-between items-start pb-6 border-b">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">{COMPANY_DETAILS.name}</h1>
+          <p className="text-sm">{COMPANY_DETAILS.address}</p>
+          <p className="text-sm">{COMPANY_DETAILS.email} | {COMPANY_DETAILS.phone}</p>
+        </div>
+        <div className="text-right">
+          <h2 className="text-2xl font-semibold uppercase text-gray-600">INVOICE</h2>
+          <p className="text-sm"><strong>Order ID:</strong> {order.id}</p>
+          <p className="text-sm"><strong>Date:</strong> {order.date}</p>
+        </div>
+      </header>
+      <section className="grid grid-cols-2 gap-8 my-6">
+        <div>
+          <h3 className="text-md font-semibold text-gray-700 mb-1">Bill To:</h3>
+          <p className="font-bold text-gray-900">{customer.name}</p>
+          <p>{customer.location}</p>
+          <p>{customer.email}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-sm"><strong>Status:</strong> <span className="font-medium">{order.status}</span></p>
+          <p className="text-sm"><strong>Expected Delivery:</strong> <span className="font-medium">{order.expectedDeliveryDate || 'N/A'}</span></p>
+        </div>
+      </section>
+      <section>
+        <h3 className="text-md font-semibold text-gray-800 mb-2">Items Ordered</h3>
+        <table className="w-full text-sm">
+          <thead className="bg-gray-100">
+            <tr>
+              <th className="py-2 px-4 text-left font-semibold">Product</th>
+              <th className="py-2 px-4 text-right font-semibold">Qty</th>
+              <th className="py-2 px-4 text-right font-semibold">Price</th>
+              <th className="py-2 px-4 text-right font-semibold">Discount</th>
+              <th className="py-2 px-4 text-right font-semibold">Subtotal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(order.orderItems ?? []).map(item => {
+              const product = findProduct(item.productId);
+              if (!product) return null;
+              const subtotal = item.price * item.quantity * (1 - (item.discount || 0) / 100);
+              return (
+                <tr key={item.productId} className="border-b">
+                  <td className="py-3 px-4">{product.name}</td>
+                  <td className="py-3 px-4 text-right">{item.quantity}</td>
+                  <td className="py-3 px-4 text-right">{formatCurrency(item.price, currency)}</td>
+                  <td className="py-3 px-4 text-right">{item.discount || 0}%</td>
+                  <td className="py-3 px-4 text-right font-semibold">{formatCurrency(subtotal, currency)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </section>
+      {order.backorderedItems && order.backorderedItems.length > 0 && (
+        <section className="mt-6">
+          <h3 className="text-md font-semibold text-yellow-700 mb-2">Backordered Items</h3>
+          <table className="w-full text-sm">
+            <thead className="bg-yellow-50">
+              <tr>
+                <th className="py-2 px-4 text-left font-semibold">Product</th>
+                <th className="py-2 px-4 text-right font-semibold">Quantity Held</th>
+              </tr>
+            </thead>
+            <tbody>
+              {order.backorderedItems.map(item => (
+                <tr key={item.productId} className="border-b">
+                  <td className="py-3 px-4">{item.productName}</td>
+                  <td className="py-3 px-4 text-right">{item.quantityHeld}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      <section className="mt-8">
+        <div className="flex justify-between items-center">
+          <span className="text-sm">Total Items:</span>
+          <span className="font-semibold">{order.totalItems}</span>
+        </div>
+        <div className="flex justify-between items-center mt-2">
+          <span className="text-lg font-bold">Grand Total:</span>
+          <span className="text-xl font-bold text-gray-900">{formatCurrency(order.total, currency)}</span>
+        </div>
+        <div className="flex justify-between items-center mt-2">
+          <span className="text-sm">Amount Paid:</span>
+          <span className="text-lg font-bold text-green-600">{formatCurrency(amountPaid, currency)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-600">Pending Cheque:</span>
+          <span className="font-medium text-yellow-600">{formatCurrency(billChequeBalance, currency)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-600">Credit Balance:</span>
+          <span className="font-medium text-red-600">{formatCurrency(billCreditBalance, currency)}</span>
+        </div>
+        <div className="flex justify-between text-lg font-bold pt-2 mt-2 border-t">
+          <span className="text-gray-800">Balance Due:</span>
+          <span className="text-red-700">{formatCurrency(totalOutstanding, currency)}</span>
+        </div>
+        <div className="mt-6 text-center text-sm text-gray-500">Thank you for your business!</div>
+      </section>
+    </div>
+  );
+}
+
+// --- Main Orders Page ---
+
+const getStatusBadgeVariant = (status: OrderStatus): 'success' | 'warning' | 'danger' | 'info' | 'default' => {
+    switch (status) {
+        case OrderStatus.Delivered: return 'success';
+        case OrderStatus.Pending: return 'warning';
+        case OrderStatus.Shipped: return 'info';
+        case OrderStatus.Cancelled: return 'danger';
+        default: return 'default';
+    }
+}
+
+export const Orders: React.FC = () => {
+  // ...existing code...
+  const [orderNotes, setOrderNotes] = useState('');
+  const [orderMethod, setOrderMethod] = useState('');
+  // ...existing code...
+  const { orders, setOrders, customers, products, setProducts, users } = useData();
+  const { currentUser } = useAuth();
+  const currency = currentUser?.settings.currency || 'LKR';
+
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<OrderStatus | 'all'>('all');
+  
+  const [modalState, setModalState] = useState<'closed' | 'create' | 'edit'>('closed');
+  const [currentOrder, setCurrentOrder] = useState<Order | null>(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<string>('');
+  const [orderItems, setOrderItems] = useState<Record<string, number>>({});
+  const [orderDiscounts, setOrderDiscounts] = useState<Record<string, number>>({});
+  const [orderItemPrices, setOrderItemPrices] = useState<Record<string, number>>({});
+  const [heldItems, setHeldItems] = useState<Set<string>>(new Set());
+  const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [viewingOrder, setViewingOrder] = useState<Order | null>(null);
+  const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
+  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState<string>('');
+  const [orderToFinalize, setOrderToFinalize] = useState<Order | null>(null);
+
+  const [editableChequeBalance, setEditableChequeBalance] = useState<number>(0);
+  const [editableCreditBalance, setEditableCreditBalance] = useState<number>(0);
+
+  const canEdit = useMemo(() => 
+    currentUser?.role === UserRole.Admin || 
+    currentUser?.role === UserRole.Manager ||
+    currentUser?.role === UserRole.Sales ||
+    currentUser?.role === UserRole.Driver,
+    [currentUser]
+  );
+  
+  const canDelete = useMemo(() => currentUser?.role === UserRole.Admin || currentUser?.role === UserRole.Manager, [currentUser]);
+
+  const isManagerView = useMemo(() => 
+    currentUser?.role === UserRole.Admin || currentUser?.role === UserRole.Manager,
+    [currentUser]
+  );
+
+  const accessibleSuppliers = useMemo(() => {
+    if (currentUser?.role === UserRole.Sales && currentUser.assignedSupplierNames) {
+        return new Set(currentUser.assignedSupplierNames);
+    }
+    return null; // null means all access for Admin/Manager
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (modalState === 'create') {
+        const customer = customers.find(c => c.id === selectedCustomer);
+        const defaultDiscounts = customer?.discounts || {};
+        const newDiscounts: Record<string, number> = {};
+        products.forEach(p => {
+            if (defaultDiscounts[p.id]) {
+                newDiscounts[p.id] = defaultDiscounts[p.id];
+            }
+        });
+        setOrderDiscounts(newDiscounts);
+    }
+  }, [selectedCustomer, modalState, customers, products]);
+
+  const availableProductsForOrder = useMemo(() => {
+    if (!accessibleSuppliers) return products;
+    return products.filter(p => accessibleSuppliers.has(p.supplier));
+  }, [products, accessibleSuppliers]);
+
+  const filteredOrders = useMemo(() => {
+    let displayOrders = [...orders];
+
+    // Role-based filtering
+    if (currentUser?.role === UserRole.Sales && currentUser.assignedSupplierNames) {
+        const accessibleSuppliers = new Set(currentUser.assignedSupplierNames);
+        const productSupplierMap = new Map(products.map(p => [p.id, p.supplier]));
+        displayOrders = displayOrders.filter(order => 
+            order.orderItems.some(item => {
+                const supplier = productSupplierMap.get(item.productId);
+                return supplier && accessibleSuppliers.has(supplier);
+            })
+        );
+    } 
+    
+    // Remove driver filter: show all orders for driver login
+    // else if (currentUser?.role === UserRole.Driver) {
+    //   displayOrders = displayOrders.filter(order => order.assignedUserId === currentUser.id);
+    // }
+    
+    // Status filter
+    if (statusFilter !== 'all') {
+      displayOrders = displayOrders.filter(order => order.status === statusFilter);
+    }
+
+    // Search filter
+    if (searchTerm) {
+        const lowercasedTerm = searchTerm.toLowerCase();
+        displayOrders = displayOrders.filter(order =>
+            order.id.toLowerCase().includes(lowercasedTerm) ||
+            order.customerName.toLowerCase().includes(lowercasedTerm)
+        );
+    }
+    return displayOrders.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [orders, products, statusFilter, searchTerm, currentUser]);
+    
+  const ordersBySupplier = useMemo(() => {
+    return filteredOrders.reduce((acc, order) => {
+      let supplierName = 'Unassigned';
+      if ((order.orderItems ?? []).length > 0) {
+        // Determine primary supplier based on highest value item in order
+        let primaryProductInfo = { supplier: 'Unassigned', value: 0 };
+        (order.orderItems ?? []).forEach(item => {
+            const product = products.find(p => p.id === item.productId);
+            if(product) {
+                const itemValue = item.price * item.quantity;
+                if(itemValue > primaryProductInfo.value){
+                    primaryProductInfo = { supplier: product.supplier, value: itemValue };
+                }
+            }
+        });
+        supplierName = primaryProductInfo.supplier;
+      }
+      if (!acc[supplierName]) {
+        acc[supplierName] = [];
+      }
+      acc[supplierName].push(order);
+      return acc;
+    }, {} as Record<string, Order[]>);
+  }, [filteredOrders, products]);
+
+  const openCreateModal = () => {
+    setCurrentOrder(null);
+    setSelectedCustomer(customers[0]?.id || '');
+    setOrderItems({});
+    setOrderDiscounts({});
+    const initialPrices = products.reduce((acc, p) => {
+        acc[p.id] = p.price;
+        return acc;
+    }, {} as Record<string, number>);
+    setOrderItemPrices(initialPrices);
+    setHeldItems(new Set());
+    setExpectedDeliveryDate('');
+    setModalState('create');
+  };
+
+  const openEditModal = (order: Order) => {
+    setCurrentOrder(order);
+    setSelectedCustomer(order.customerId);
+    // Fix: Use (order.orderItems ?? []) and (order.backorderedItems ?? [])
+    const allItems = [...(order.orderItems ?? []), ...((order.backorderedItems ?? []))];
+    const items = allItems.reduce((acc, item) => {
+      acc[item.productId] = item.quantity;
+      return acc;
+    }, {} as Record<string, number>);
+    const discounts = (order.orderItems ?? []).reduce((acc, item) => {
+      acc[item.productId] = item.discount || 0;
+      return acc;
+    }, {} as Record<string, number>);
+    const prices = allItems.reduce((acc, item) => {
+        acc[item.productId] = item.price;
+        return acc;
+    }, {} as Record<string, number>);
+    products.forEach(p => {
+        if (!prices[p.id]) {
+            prices[p.id] = p.price;
+        }
+    });
+
+    const backorderedIds = new Set((order.backorderedItems ?? []).map(item => item.productId));
+    setOrderItems(items);
+    setOrderDiscounts(discounts);
+    setOrderItemPrices(prices);
+    setHeldItems(backorderedIds);
+    setExpectedDeliveryDate(order.expectedDeliveryDate || '');
+    setModalState('edit');
+  };
+  
+  const closeModal = () => {
+    setModalState('closed');
+    setCurrentOrder(null);
+  };
+
+  const openDeleteModal = (order: Order) => {
+    setOrderToDelete(order);
+  };
+  
+  const closeDeleteModal = () => {
+    setOrderToDelete(null);
+  };
+
+  const openViewModal = (order: Order) => {
+    // Patch: Ensure customerId is always set in viewingOrder
+    const patchedOrder = {
+      ...order,
+      customerId: order.customerId || '', // use only camelCase for type safety
+    };
+    setViewingOrder(patchedOrder);
+    setEditableChequeBalance(patchedOrder.chequeBalance || 0);
+    setEditableCreditBalance(patchedOrder.creditBalance || 0);
+  };
+
+  const closeViewModal = () => {
+    setViewingOrder(null);
+  };
+
+  const handleQuantityChange = (productId: string, quantity: number) => {
+    const product = products.find(p => p.id === productId);
+    if (!product) return;
+    
+    const isHeld = heldItems.has(productId);
+    const maxQuantity = product.stock > 0 && !isHeld ? product.stock : Infinity;
+    const newQuantity = Math.max(0, Math.min(quantity, maxQuantity));
+    setOrderItems(prev => ({ ...prev, [productId]: newQuantity }));
+  };
+
+  const handleDiscountChange = (productId: string, discount: number) => {
+    const newDiscount = Math.max(0, Math.min(discount, 100));
+    setOrderDiscounts(prev => ({ ...prev, [productId]: newDiscount}));
+  };
+  
+  const handlePriceChange = (productId: string, price: number) => {
+    const newPrice = Math.max(0, price);
+    setOrderItemPrices(prev => ({ ...prev, [productId]: newPrice }));
+};
+
+  const toggleHoldItem = (productId: string) => {
+    setHeldItems(prev => {
+        const newSet = new Set(prev);
+        if (newSet.has(productId)) {
+            newSet.delete(productId);
+        } else {
+            newSet.add(productId);
+        }
+        return newSet;
+    });
+};
+
+  const { total, inStockItems, heldItemsCount } = useMemo(() => {
+    return Object.entries(orderItems).reduce(
+      (acc, [productId, quantity]: [string, number]) => {
+        const product = products.find(p => p.id === productId);
+        if (product && quantity > 0) {
+          const isHeld = heldItems.has(productId);
+          const isOutOfStock = product.stock === 0;
+
+          if (isHeld || isOutOfStock) {
+            acc.heldItemsCount += quantity;
+          } else {
+            const price = orderItemPrices[productId] ?? product.price;
+            const discount = orderDiscounts[productId] || 0;
+            const discountedPrice = price * (1 - discount / 100);
+            acc.total += discountedPrice * quantity;
+            acc.inStockItems += quantity;
+          }
+        }
+        return acc;
+      },
+      { total: 0, inStockItems: 0, heldItemsCount: 0 }
+    );
+  }, [orderItems, orderDiscounts, orderItemPrices, heldItems, products]);
+
+  const handleSaveOrder = async () => {
+  if (!selectedCustomer || (inStockItems === 0 && heldItemsCount === 0)) {
+    alert("Please select a customer and add at least one item.");
+    return;
+  }
+
+  const customer = customers.find(c => c.id === selectedCustomer);
+  if (!customer) return;
+
+  const newOrderItems: OrderItem[] = [];
+  const newBackorderedItems: OrderItem[] = [];
+
+  Object.entries(orderItems)
+    .filter(([, quantity]: [string, number]) => quantity > 0)
+    .forEach(([productId, quantity]: [string, number]) => {
+      const product = products.find(p => p.id === productId);
+      if (!product) return;
+      const isHeld = heldItems.has(productId);
+      const isOutOfStock = product.stock === 0;
+      const price = orderItemPrices[productId] ?? product?.price ?? 0;
+
+      if (isHeld || isOutOfStock) {
+        newBackorderedItems.push({ productId, quantity, price });
+      } else {
+         newOrderItems.push({ 
+          productId, 
+          quantity, 
+          price: price,
+          discount: orderDiscounts[productId] || 0,
+        });
+      }
+    });
+
+  // Patch: Always assign customerId (snake_case for DB)
+  if (modalState === 'create') {
+    const maxIdNum = orders.reduce((max, order) => {
+      const num = parseInt(order.id.replace('ORD', ''), 10);
+      return num > max ? num : max;
+    }, 0);
+
+    const newOrder = {
+      id: `ORD${(maxIdNum + 1).toString().padStart(4, '0')}`,
+      customerid: customer.id,
+      customername: customer.name,
+      assigneduserid: currentUser?.id ?? '',
+      orderitems: JSON.stringify(newOrderItems),
+      backordereditems: JSON.stringify(newBackorderedItems),
+      method: orderMethod || '',
+      expecteddeliverydate: expectedDeliveryDate || null,
+      orderdate: expectedDeliveryDate || new Date().toISOString().slice(0, 10),
+      totalamount: total,
+      status: OrderStatus.Pending,
+      notes: orderNotes || '',
+    };
+    const { error } = await supabase.from('orders').insert([newOrder]);
+    if (error) alert('Error adding order: ' + error.message);
+    const freshOrders = await fetchOrders();
+    // if (freshOrders) setOrders(freshOrders);
+    if (freshOrders) {
+      const normalized = freshOrders.map(o => ({
+        ...o,
+        date: o.orderdate || o.date || null,   // unify to `date`
+        customerName: o.customername || o.customerName || '',
+        customerId: o.customerid || o.customerId || '',
+        assignedUserId: o.assigneduserid || o.assignedUserId || '',
+        total: o.totalamount ?? o.total ?? 0,
+        orderItems: typeof o.orderitems === 'string' ? JSON.parse(o.orderitems) : o.orderitems,
+        backorderedItems: typeof o.backordereditems === 'string' ? JSON.parse(o.backordereditems) : o.backordereditems,
+      }));
+      setOrders(normalized);
+    }
+  } else if (modalState === 'edit' && currentOrder) {
+    const updatedOrder = {
+      customerid: customer.id,
+      customername: customer.name,
+      assigneduserid: currentOrder.assigneduserid ?? '',
+      orderitems: JSON.stringify(newOrderItems),
+      backordereditems: JSON.stringify(newBackorderedItems),
+      method: orderMethod || '',
+      expecteddeliverydate: expectedDeliveryDate || null,
+      orderdate: expectedDeliveryDate || currentOrder.orderdate || new Date().toISOString().slice(0, 10),
+      totalamount: total,
+      status: currentOrder.status ?? OrderStatus.Pending,
+      notes: orderNotes || '',
+    };
+    const { error } = await supabase.from('orders').update(updatedOrder).eq('id', currentOrder.id);
+    if (error) alert('Error updating order: ' + error.message);
+    const freshOrders = await fetchOrders();
+    // if (freshOrders) setOrders(freshOrders);
+    if (freshOrders) {
+      const normalized = freshOrders.map(o => ({
+        ...o,
+        date: o.orderdate || o.date || null,   // unify to `date`
+        customerName: o.customername || o.customerName || '',
+        customerId: o.customerid || o.customerId || '',
+        assignedUserId: o.assigneduserid || o.assignedUserId || '',
+        total: o.totalamount ?? o.total ?? 0,
+        orderItems: typeof o.orderitems === 'string' ? JSON.parse(o.orderitems) : o.orderitems,
+        backorderedItems: typeof o.backordereditems === 'string' ? JSON.parse(o.backordereditems) : o.backordereditems,
+      }));
+      setOrders(normalized);
+    }
+  }
+  closeModal();
+};
+  
+  const handleDeleteOrder = async () => {
+    if (!orderToDelete) return;
+    await supabase.from('orders').delete().eq('id', orderToDelete.id);
+    const freshOrders = await fetchOrders();
+    if (freshOrders) setOrders(freshOrders);
+    closeDeleteModal();
+  };
+  
+  const handleStatusChange = (orderId: string, newStatus: OrderStatus) => {
+    setOrders(prevOrders =>
+      prevOrders.map(o =>
+        o.id === orderId ? { ...o, status: newStatus } : o
+      )
+    );
+  };
+
+  const handleToggleHoldInView = (productId: string, action: 'hold' | 'unhold') => {
+    if (!viewingOrder) return;
+
+    const updatedOrder = JSON.parse(JSON.stringify(viewingOrder));
+    let itemToMove: OrderItem | undefined;
+
+    if (action === 'hold') {
+      const itemIndex = updatedOrder.orderItems.findIndex((item: OrderItem) => item.productId === productId);
+      if (itemIndex === -1) return;
+      
+      itemToMove = updatedOrder.orderItems[itemIndex];
+      updatedOrder.orderItems.splice(itemIndex, 1);
+      
+      if (!updatedOrder.backorderedItems) {
+        updatedOrder.backorderedItems = [];
+      }
+      updatedOrder.backorderedItems.push(itemToMove);
+
+    } else { // unhold
+      const product = products.find(p => p.id === productId);
+      if (!product || product.stock === 0) return;
+
+      const itemIndex = (updatedOrder.backorderedItems || []).findIndex((item: OrderItem) => item.productId === productId);
+      if (itemIndex === -1) return;
+
+      itemToMove = updatedOrder.backorderedItems![itemIndex];
+      updatedOrder.backorderedItems!.splice(itemIndex, 1);
+      updatedOrder.orderItems.push(itemToMove);
+    }
+    
+    const newTotal = updatedOrder.orderItems.reduce((sum: number, item: OrderItem) => {
+        const discount = item.discount || 0;
+        const subtotal = item.price * item.quantity * (1 - discount / 100);
+        return sum + subtotal;
+    }, 0);
+    updatedOrder.total = newTotal;
+
+    setViewingOrder(updatedOrder);
+    setOrders(prevOrders => prevOrders.map(o => o.id === updatedOrder.id ? updatedOrder : o));
+  };
+
+  const handleSaveBalances = () => {
+    if (!viewingOrder) return;
+    const totalOutstanding = editableChequeBalance + editableCreditBalance;
+    if (totalOutstanding > viewingOrder.total) {
+        if (!window.confirm('The outstanding balance is greater than the order total. Do you want to proceed?')) {
+            return;
+        }
+    }
+    const updatedOrder: Order = {
+        ...viewingOrder,
+        chequeBalance: editableChequeBalance,
+        creditBalance: editableCreditBalance,
+    };
+    // Save to Supabase
+    supabase.from('orders').update({
+  chequebalance: editableChequeBalance,
+  creditbalance: editableCreditBalance
+    }).eq('id', viewingOrder.id).then(async ({ error }) => {
+      if (!error) {
+        // Refetch orders to persist changes after refresh
+        const { data: freshOrders, error: fetchError } = await supabase.from('orders').select('*');
+        if (!fetchError && freshOrders) {
+          setOrders(freshOrders);
+          setViewingOrder(updatedOrder);
+          alert('Balances updated and saved!');
+        } else {
+          alert('Balances saved, but failed to refresh orders.');
+        }
+      } else {
+        alert('Failed to save balances: ' + error.message);
+      }
+    });
+  };
+
+  const handleConfirmFinalize = async () => {
+    if (!orderToFinalize) return;
+    // Integrity check
+    if (!orderToFinalize || !orderToFinalize.orderItems || orderToFinalize.orderItems.length === 0) {
+      alert("Cannot finalize an order with no items.");
+      setOrderToFinalize(null);
+      return;
+    }
+    // Check stock levels before proceeding
+    let stockSufficient = true;
+    for (const item of orderToFinalize.orderItems) {
+        const product = products.find(p => p.id === item.productId);
+        if (!product || product.stock < item.quantity) {
+            alert(`Insufficient stock for ${product?.name || 'an item'}. Cannot finalize order.`);
+            stockSufficient = false;
+            break;
+        }
+    }
+    if (!stockSufficient) {
+        setOrderToFinalize(null);
+        return; // Abort the finalization
+    }
+    // --- Update sold column in orders table ---
+    const soldQty = orderToFinalize.orderItems.reduce((sum, i) => sum + i.quantity, 0);
+    await supabase.from('orders').update({ status: OrderStatus.Delivered, sold: soldQty }).eq('id', orderToFinalize.id);
+    // --- Sync allocation salesTotal and update allocatedItems after delivery ---
+    if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const allocation = (window as any).driverAllocations.find((a: any) => a.driverId === currentUser.id && a.date === todayStr);
+      if (allocation) {
+        // Update salesTotal
+        const newSalesTotal = (allocation.salesTotal || 0) + soldQty;
+        // Reduce delivered product quantities from allocatedItems
+        const deliveredItems = orderToFinalize.orderItems;
+        let updatedAllocatedItems = allocation.allocatedItems.map((item: any) => {
+          const delivered = deliveredItems.find((di: any) => di.productId === item.productId);
+          if (delivered) {
+            const newQty = item.quantity - delivered.quantity;
+            return { ...item, quantity: newQty > 0 ? newQty : 0 };
+          }
+          return item;
+        }).filter((item: any) => item.quantity > 0); // Remove items with 0 qty
+        // Update allocation in Supabase
+        await supabase.from('driver_allocations').update({ sales_total: newSalesTotal, allocated_items: JSON.stringify(updatedAllocatedItems) }).eq('id', allocation.id);
+  // TODO: Refetch driver allocations here using context or effect so driver sees only undelivered products
+      }
+    }
+
+    if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const allocation = (window as any).driverAllocations.find(
+    (a: any) => a.driverId === currentUser.id && a.date === todayStr
+  );
+
+  if (allocation) {
+    const deliveredItems = orderToFinalize.orderItems;
+
+    // recalc sales total
+    const newSalesTotal =
+      (allocation.salesTotal || 0) + deliveredItems.reduce((sum, i) => sum + i.quantity, 0);
+
+    // subtract delivered items from driver’s allocation
+    const updatedAllocatedItems = allocation.allocatedItems
+      .map((item: any) => {
+        const delivered = deliveredItems.find((d: any) => d.productId === item.productId);
+        if (delivered) {
+          const newQty = item.quantity - delivered.quantity;
+          return { ...item, quantity: newQty > 0 ? newQty : 0 };
+        }
+        return item;
+      })
+      .filter((item: any) => item.quantity > 0);
+
+    // update allocation in DB
+    await supabase
+      .from('driver_allocations')
+      .update({
+        sales_total: newSalesTotal,
+        allocated_items: JSON.stringify(updatedAllocatedItems),
+      })
+      .eq('id', allocation.id);
+
+    // update local cache so UI refreshes
+    (window as any).driverAllocations = (window as any).driverAllocations.map((a: any) =>
+      a.id === allocation.id
+        ? { ...a, allocatedItems: updatedAllocatedItems, salesTotal: newSalesTotal }
+        : a
+    );
+  }
+}
+
+    // 2. Update order status
+    const updatedOrder: Order = { ...orderToFinalize, status: OrderStatus.Delivered };
+    (async () => {
+      await supabase.from('orders').update({ status: OrderStatus.Delivered }).eq('id', updatedOrder.id);
+    })();
+    setOrders(prevOrders =>
+      prevOrders.map(o => (o.id === updatedOrder.id ? updatedOrder : o))
+    );
+    setViewingOrder(updatedOrder);
+
+    // --- Update customer totals in Supabase ---
+    (async () => {
+      // Get all delivered orders for this customer
+      const customerOrders = orders.filter(o => o.customerId === updatedOrder.customerId && o.status === OrderStatus.Delivered);
+      // Add this order if just delivered
+      if (!customerOrders.find(o => o.id === updatedOrder.id)) {
+        customerOrders.push(updatedOrder);
+      }
+      const totalSpent = customerOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+      const outstandingBalance = customerOrders.reduce((sum, o) => sum + ((o.chequeBalance || 0) + (o.creditBalance || 0)), 0);
+      await supabase.from('customers').update({ totalspent: totalSpent, outstandingbalance: outstandingBalance }).eq('id', updatedOrder.customerId);
+    })();
+
+    // --- End Transaction Simulation ---
+    // 4. Log actions
+    console.log(`AUDIT: {action: "Auto-mark Delivered", userId: "${currentUser?.id}", orderId: "${updatedOrder.id}", timestamp: "${new Date().toISOString()}"}`);
+    console.log(`INVENTORY: Stock deducted for order ${updatedOrder.id}.`);
+    console.log(`SALES_RECORD: Sale confirmed for order ${updatedOrder.id}, amount: ${formatCurrency(updatedOrder.total, currency)}.`);
+    setIsPrintPreviewOpen(true);
+    setOrderToFinalize(null);
+  };
+  
+  const handleEmailBill = () => {
+    if (!viewingOrder) return;
+    const customer = customers.find(c => c.id === viewingOrder.customerId);
+    if (!customer || !customer.email) {
+      alert("This customer does not have an email address on file.");
+      return;
+    }
+  
+    const subject = `Invoice for Order ${viewingOrder.id} from ${COMPANY_DETAILS.name}`;
+    
+    const itemsSummary = viewingOrder.orderItems.map(item => {
+      const product = products.find(p => p.id === item.productId);
+      const subtotal = (item.quantity * item.price) * (1 - (item.discount || 0) / 100);
+      return `- ${product?.name || 'Unknown Product'}: ${item.quantity} x ${formatCurrency(item.price, currency)} (Discount: ${item.discount || 0}%) = ${formatCurrency(subtotal, currency)}`;
+    }).join('\n');
+
+    const backorderedSummary = (viewingOrder.backorderedItems && viewingOrder.backorderedItems.length > 0)
+    ? `\n\nBackordered Items:\n${viewingOrder.backorderedItems.map(item => {
+        const product = products.find(p => p.id === item.productId);
+        return `- ${product?.name || 'Unknown Product'}: ${item.quantity}`;
+      }).join('\n')}`
+    : '';
+  
+    const body = `
+Dear ${customer.name},
+
+Thank you for your order! Here is a summary of your invoice for order #${viewingOrder.id}.
+
+Items Ordered:
+${itemsSummary}
+${backorderedSummary}
+
+Total Amount: ${formatCurrency(viewingOrder.total, currency)}
+
+Expected Delivery Date: ${viewingOrder.expectedDeliveryDate || 'To be confirmed'}
+
+We appreciate your business.
+
+Sincerely,
+The Team at ${COMPANY_DETAILS.name}
+${COMPANY_DETAILS.email}
+    `;
+  
+    window.location.href = `mailto:${customer.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  };
+
+  return (
+    <>
+      <style>{`
+        @media print {
+          .no-print {
+            display: none !important;
+          }
+          body * {
+            visibility: hidden;
+          }
+          #printable-bill-content, #printable-bill-content * {
+            visibility: visible;
+          }
+          #printable-bill-content {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+          }
+        }
+      `}</style>
+
+      <div className="p-4 sm:p-6 lg:p-8 space-y-8 no-print">
+        <div className="flex justify-between items-center">
+          <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">Orders</h1>
+          {canEdit && (
+            <button
+              onClick={openCreateModal}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              New Order
+            </button>
+          )}
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{isManagerView ? 'Order History' : 'My Orders'}</CardTitle>
+            <CardDescription>
+                {isManagerView ? 'View and manage all customer orders.' : 'View and manage orders assigned to you.'}
+            </CardDescription>
+            <div className="pt-4 flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-4">
+              <input
+                type="text"
+                placeholder="Search by Order ID or Customer..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full max-w-sm px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as OrderStatus | 'all')}
+                  className="px-4 py-2 border border-slate-300 dark:border-slate-600 rounded-lg bg-slate-50 dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                  <option value="all">All Statuses</option>
+                  {Object.values(OrderStatus).map(status => (
+                      <option key={status} value={status}>{status}</option>
+                  ))}
+              </select>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-8">
+              {Object.entries(ordersBySupplier).map(([supplierName, supplierOrders]) => {
+                const ordersList = (supplierOrders ?? []) as Order[];
+                return (
+                  <div key={supplierName}>
+                    <div className="flex items-center space-x-3 mb-4">
+                      <h2 className="text-xl font-semibold text-slate-700 dark:text-slate-300">{supplierName}</h2>
+                      <Badge variant="default">{ordersList.length} {ordersList.length === 1 ? 'Order' : 'Orders'}</Badge>
+                    </div>
+                    <div className="overflow-x-auto border dark:border-slate-700 rounded-lg">
+                      <table className="w-full text-sm text-left text-slate-500 dark:text-slate-400">
+                        <thead className="text-xs text-slate-700 uppercase bg-slate-50 dark:bg-slate-700 dark:text-slate-400">
+                          <tr>
+                            <th scope="col" className="px-6 py-3">Order ID</th>
+                            <th scope="col" className="px-6 py-3">Customer Name</th>
+                            {isManagerView && <th scope="col" className="px-6 py-3">Assigned To</th>}
+                            <th scope="col" className="px-6 py-3">Date</th>
+                            <th scope="col" className="px-6 py-3">Total</th>
+                            <th scope="col" className="px-6 py-3">Items</th>
+                            <th scope="col" className="px-6 py-3">Status</th>
+                             <th scope="col" className="px-6 py-3">Outstanding</th>
+                            <th scope="col" className="px-6 py-3">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ordersList.map((order) => {
+                // Use DB columns: assigneduserid, totalamount, orderdate
+                              const assignedUser = users.find(u => u.id === order.assignedUserId);
+                let allocatedProductIds: string[] = [];
+                if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
+                  const todayStr = new Date().toISOString().slice(0, 10);
+                  const allocations = (window as any).driverAllocations;
+                  console.log('DriverAllocations:', allocations);
+                  console.log('CurrentUser:', currentUser);
+                  const allocation = allocations.find((a: any) => {
+                    console.log('Checking allocation:', a);
+                    return a.driverId === currentUser.id && a.date === todayStr;
+                  });
+                  console.log('Matched allocation:', allocation);
+                  if (allocation) {
+                    allocatedProductIds = allocation.allocatedItems.map((i: any) => i.productId);
+                  }
+                }
+                return (
+                  <tr key={order.id} className="bg-white border-b dark:bg-slate-800 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-600">
+                    <td className="px-6 py-4 font-medium text-slate-900 dark:text-white">{order.id}</td>
+                    <td className="px-6 py-4">{order.customerName}</td>
+                    {isManagerView && (
+                      <td className="px-6 py-4">
+                        {assignedUser ? (
+                          <div className="flex items-center space-x-2">
+                            {assignedUser.avatarUrl && <img src={assignedUser.avatarUrl} alt={assignedUser.name} className="w-6 h-6 rounded-full" />}
+                            <span className="text-xs">{assignedUser.name}</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-400">N/A</span>
+                        )}
+                      </td>
+                    )}
+                    <td className="px-6 py-4">{
+                                        order.date
+                                          ? (() => {
+                                              const d = new Date(order.date);
+                                              return isNaN(d.getTime())
+                                                ? <span className="text-xs text-red-500">{order.date}</span>
+                                                : d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+                                            })()
+                                          : 'N/A'
+                                      }</td>
+                    <td className="px-6 py-4">{typeof order.total === 'number' ? `LKR${order.total.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : 'LKR0'}</td>
+                    <td className="px-6 py-4">
+                      {(order.orderItems ?? []).filter(item => {
+                        if (currentUser?.role === UserRole.Driver && allocatedProductIds.length > 0) {
+                          return allocatedProductIds.includes(item.productId);
+                        }
+                        return true;
+                      }).map(item => {
+                        const product = products.find(p => p.id === item.productId);
+                        if (!product) return null;
+                        return (
+                          <span key={item.productId} className="inline-block mr-2 bg-slate-100 dark:bg-slate-700 px-2 py-1 rounded text-xs">
+                            {product.name} x {item.quantity}
+                          </span>
+                        );
+                      })}
+                    </td>
+                    <td className="px-6 py-4">
+                      <Badge variant={getStatusBadgeVariant(order.status)}>{order.status}</Badge>
+                    </td>
+                     <td className="px-6 py-4">
+                       <div>
+                         <span className="block text-xs text-slate-600">Cheque: <span className="font-bold">{typeof order.chequeBalance === 'number' && !isNaN(order.chequeBalance) ? `LKR${order.chequeBalance.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : 'LKR0.00'}</span></span>
+                         <span className="block text-xs text-slate-600">Credit: <span className="font-bold">{typeof order.creditBalance === 'number' && !isNaN(order.creditBalance) ? `LKR${order.creditBalance.toLocaleString('en-IN', { maximumFractionDigits: 2 })}` : 'LKR0.00'}</span></span>
+                         <span className="block text-xs text-red-600">Outstanding: <span className="font-bold">{'LKR' + ((typeof order.chequeBalance === 'number' && !isNaN(order.chequeBalance) ? order.chequeBalance : 0) + (typeof order.creditBalance === 'number' && !isNaN(order.creditBalance) ? order.creditBalance : 0)).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span></span>
+                       </div>
+                     </td>
+                    <td className="px-6 py-4 flex items-center space-x-3">
+                    <button onClick={() => openViewModal(order)} className="font-medium text-slate-600 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-300">View</button>
+                    {canEdit && (
+                      <>
+                        <button onClick={() => openEditModal(order)} className="font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">Edit</button>
+                        {canDelete && <button onClick={() => openDeleteModal(order)} className="font-medium text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300">Delete</button>}
+                      </>
+                    )}
+                    </td>
+                  </tr>
+                              );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+               {Object.keys(ordersBySupplier).length === 0 && (
+                <div className="text-center py-10">
+                  <p className="text-slate-500 dark:text-slate-400">No orders found matching your criteria.</p>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Modal
+          isOpen={modalState === 'create' || modalState === 'edit'}
+          onClose={closeModal}
+          title={modalState === 'create' ? 'Create New Order' : `Edit Order ${currentOrder?.id}`}
+        >
+          <div className="flex flex-col max-h-[90vh]">
+            {/* Body: scrollable */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {/* Customer + Date */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="customer" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Customer</label>
+                  <select
+                    id="customer"
+                    value={selectedCustomer}
+                    onChange={(e) => setSelectedCustomer(e.target.value)}
+                    className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
+                  >
+                    {customers.map(customer => (
+                      <option key={customer.id} value={customer.id}>{customer.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="deliveryDate" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Expected Delivery Date</label>
+                  <input
+                    type="date"
+                    id="deliveryDate"
+                    value={expectedDeliveryDate}
+                    onChange={(e) => setExpectedDeliveryDate(e.target.value)}
+                    className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
+                  />
+                </div>
+              </div>
+
+              {/* Products */}
+              <div>
+                <label className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Products</label>
+                <div className="space-y-3">
+                  {availableProductsForOrder.map(product => {
+                    const isOutOfStock = product.stock === 0;
+                    const isHeld = heldItems.has(product.id);
+                    const isUnavailable = isHeld || isOutOfStock;
+                    
+                    return (
+                      <div key={product.id} className={`grid grid-cols-12 gap-2 items-center p-2 rounded-lg transition-colors ${isHeld ? 'bg-yellow-50 dark:bg-yellow-900/40' : 'bg-slate-50 dark:bg-slate-700'} ${isOutOfStock && !isHeld ? 'opacity-70' : ''}`}>
+                        <div className="flex items-center space-x-3 col-span-12 sm:col-span-4">
+                          <img src={product.imageUrl} alt={product.name} className="w-10 h-10 rounded-md" />
+                          <div>
+                            <p className="font-medium text-slate-900 dark:text-white">{product.name}</p>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                              {isOutOfStock ? <span className="text-red-500 font-semibold ml-1">Out of Stock</span> : ` Stock: ${product.stock}`}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="col-span-4 sm:col-span-2">
+                          <label htmlFor={`price-${product.id}`} className="sr-only">Unit Price for {product.name}</label>
+                          <div className="relative">
+                              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">{currency}</span>
+                              <input
+                                  type="number"
+                                  id={`price-${product.id}`}
+                                  min="0"
+                                  step="0.01"
+                                  value={orderItemPrices[product.id] ?? ''}
+                                  placeholder={product.price.toFixed(2)}
+                                  onChange={(e) => handlePriceChange(product.id, parseFloat(e.target.value) || 0)}
+                                  className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center pl-10"
+                                  disabled={isUnavailable}
+                              />
+                          </div>
+                        </div>
+                        <div className="col-span-4 sm:col-span-2">
+                          <label htmlFor={`discount-${product.id}`} className="sr-only">Discount for {product.name}</label>
+                            <div className="relative">
+                              <input
+                                  type="number"
+                                  id={`discount-${product.id}`}
+                                  min="0"
+                                  max="100"
+                                  value={orderDiscounts[product.id] || ''}
+                                  placeholder="0"
+                                  onChange={(e) => handleDiscountChange(product.id, parseInt(e.target.value, 10) || 0)}
+                                  className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:cursor-not-allowed"
+                                  disabled={isUnavailable}
+                              />
+                              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">%</span>
+                            </div>
+                        </div>
+                          <div className="col-span-4 sm:col-span-2">
+                          <label htmlFor={`quantity-${product.id}`} className="sr-only">Quantity for {product.name}</label>
+                          <input
+                              type="number"
+                              id={`quantity-${product.id}`}
+                              min="0"
+                              max={isUnavailable ? undefined : product.stock}
+                              value={orderItems[product.id] || ''}
+                              placeholder="0"
+                              onChange={(e) => handleQuantityChange(product.id, parseInt(e.target.value, 10) || 0)}
+                              className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center"
+                          />
+                        </div>
+                          <div className="col-span-12 sm:col-span-2">
+                            <button
+                              onClick={() => toggleHoldItem(product.id)}
+                              className={`w-full py-1.5 text-xs font-medium rounded-md transition-colors ${isHeld ? 'bg-yellow-400 text-yellow-900 hover:bg-yellow-500' : 'bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500'}`}
+                              >
+                              {isHeld ? 'Unhold' : 'Hold'}
+                            </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Notes + Payment */}
+              <div>
+                <label htmlFor="orderNotes" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Order Notes</label>
+                <input
+                  type="text"
+                  id="orderNotes"
+                  value={orderNotes}
+                  onChange={e => setOrderNotes(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="orderMethod" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Payment Method</label>
+                <input
+                  type="text"
+                  id="orderMethod"
+                  value={orderMethod}
+                  onChange={e => setOrderMethod(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                />
+              </div>
+            </div>
+
+            {/* Footer: fixed */}
+            <div className="p-6 border-t">
+              <div className="text-sm space-y-1 mb-4">
+                <p className="text-slate-600 dark:text-slate-300">
+                  Items (In Stock): <span className="font-bold text-slate-900 dark:text-white">{inStockItems}</span>
+                </p>
+                {heldItemsCount > 0 && (
+                  <p className="text-yellow-600 dark:text-yellow-400">
+                    Items (Held/OOS): <span className="font-bold">{heldItemsCount}</span>
+                  </p>
+                )}
+                <p className="text-slate-600 dark:text-slate-300 text-base">
+                  Total Price: <span className="font-bold text-slate-900 dark:text-white">{formatCurrency(total, currency)}</span>
+                </p>
+              </div>
+
+              <div className="flex space-x-2">
+                <button
+                  onClick={closeModal}
+                  type="button"
+                  className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveOrder}
+                  type="button"
+                  className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 disabled:cursor-not-allowed"
+                  disabled={(inStockItems + heldItemsCount) === 0 || !selectedCustomer}
+                >
+                  {modalState === 'create' ? 'Create Order' : 'Save Changes'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+
+        <Modal isOpen={!!orderToDelete} onClose={closeDeleteModal} title="Confirm Deletion">
+              <div className="p-6">
+                  <p className="text-slate-600 dark:text-slate-300">Are you sure you want to delete order "{orderToDelete?.id}"?</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">This action cannot be undone.</p>
+              </div>
+              <div className="flex items-center justify-end p-6 space-x-2 border-t border-slate-200 rounded-b dark:border-slate-600">
+                  <button onClick={closeDeleteModal} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
+                      Cancel
+                  </button>
+                  <button onClick={handleDeleteOrder} type="button" className="text-white bg-red-600 hover:bg-red-700 focus:ring-4 focus:outline-none focus:ring-red-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-red-600 dark:hover:bg-red-700">
+                      Delete
+                  </button>
+              </div>
+          </Modal>
+
+          {viewingOrder && (() => {
+              const customer = customers.find(c => c.id === viewingOrder.customerId);
+              return (
+                  <Modal isOpen={!!viewingOrder} onClose={closeViewModal} title={`Order Details: ${viewingOrder.id}`}>
+                      <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+                              <div>
+                                  <p className="font-semibold text-slate-700 dark:text-slate-300">Customer:</p>
+                                  <p className="text-slate-900 dark:text-white">{viewingOrder.customerName}</p>
+                              </div>
+                              <div>
+                                  <p className="font-semibold text-slate-700 dark:text-slate-300">Location:</p>
+                                  <p className="text-slate-900 dark:text-white">{customer?.location || 'N/A'}</p>
+                              </div>
+                <div>
+                  <p className="font-semibold text-slate-700 dark:text-slate-300">Order Date:</p>
+                  <p className="text-slate-900 dark:text-white">{viewingOrder.orderdate}</p>
+                </div>
+                              <div>
+                                  <p className="font-semibold text-slate-700 dark:text-slate-300">Status:</p>
+                                  <p><Badge variant={getStatusBadgeVariant(viewingOrder.status)}>{viewingOrder.status}</Badge></p>
+                <div>
+                  <p className="font-semibold text-slate-700 dark:text-slate-300">Assigned To:</p>
+                  <p className="text-slate-900 dark:text-white">{viewingOrder.assigneduserid}</p>
+                </div>
+                              </div>
+                          </div>
+                          
+                          <div className="pt-4 border-t dark:border-slate-700">
+                              <h4 className="text-md font-semibold text-slate-800 dark:text-slate-200 mb-2">Financial Summary</h4>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                                  <div>
+                                      <label htmlFor="chequeBalance" className="block mb-1 text-sm font-medium text-slate-700 dark:text-slate-300">Pending Cheque</label>
+                                      <div className="relative">
+                                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{currency}</span>
+                                          <input 
+                                              type="number"
+                                              id="chequeBalance"
+                                              step="0.01"
+                                              min="0"
+                                              value={editableChequeBalance}
+                                              onChange={(e) => setEditableChequeBalance(parseFloat(e.target.value) || 0)}
+                                              className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pl-10 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                                              disabled={!canEdit}
+                                          />
+                                      </div>
+                                  </div>
+                                  <div>
+                                      <label htmlFor="creditBalance" className="block mb-1 text-sm font-medium text-slate-700 dark:text-slate-300">Credit Balance</label>
+                                          <div className="relative">
+                                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{currency}</span>
+                                          <input 
+                                              type="number"
+                                              id="creditBalance"
+                                              step="0.01"
+                                              min="0"
+                                              value={editableCreditBalance}
+                                              onChange={(e) => setEditableCreditBalance(parseFloat(e.target.value) || 0)}
+                                              className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pl-10 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                                              disabled={!canEdit}
+                                          />
+                                      </div>
+                                  </div>
+                                  <div className="sm:col-span-2 mt-2 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
+                                      <div className="flex justify-between">
+                                          <span className="text-slate-600 dark:text-slate-400">Amount Paid:</span> 
+                                          <span className="font-medium text-green-600">{formatCurrency(viewingOrder.total - editableChequeBalance - editableCreditBalance, currency)}</span>
+                                      </div>
+                                      <div className="flex justify-between font-bold text-base mt-1">
+                                          <span className="text-slate-800 dark:text-slate-200">Balance Due:</span> 
+                                          <span className="text-red-600">{formatCurrency(editableChequeBalance + editableCreditBalance, currency)}</span>
+                                      </div>
+                                  </div>
+                              </div>
+                          </div>
+
+                          <div className="pt-2">
+                              <h4 className="text-md font-semibold text-slate-800 dark:text-slate-200 mb-2">Items Ordered</h4>
+                              <div className="overflow-x-auto border rounded-lg dark:border-slate-700">
+                                  <table className="min-w-full text-sm">
+                                      <thead className="text-xs text-slate-700 uppercase bg-slate-50 dark:bg-slate-700 dark:text-slate-400">
+                                          <tr>
+                                              <th className="py-2 px-4 text-left">Product</th>
+                                              <th className="py-2 px-4 text-right">Quantity</th>
+                                              <th className="py-2 px-4 text-right">Unit Price</th>
+                                              <th className="py-2 px-4 text-right">Discount</th>
+                                              <th className="py-2 px-4 text-right">Subtotal</th>
+                                              <th className="py-2 px-4 text-center">Actions</th>
+                                          </tr>
+                                      </thead>
+                                      <tbody className="text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                                          {(viewingOrder.orderItems ?? []).map(item => {
+                                              const product = products.find(p => p.id === item.productId);
+                                              if (!product) return null;
+                                              const subtotal = (item.quantity * item.price) * (1 - (item.discount || 0) / 100);
+                                              return (
+                                                  <tr key={item.productId}>
+                                                      <td className="py-3 px-4">
+                                                          <div className="flex items-center space-x-3">
+                                                              <img src={product.imageUrl} alt={product.name} className="w-10 h-10 rounded-md object-cover" />
+                                                              <span className="font-medium text-slate-800 dark:text-slate-200">{product.name}</span>
+                                                          </div>
+                                                      </td>
+                                                      <td className="py-3 px-4 text-right">{item.quantity}</td>
+                                                      <td className="py-3 px-4 text-right">{formatCurrency(item.price, currency)}</td>
+                                                      <td className="py-3 px-4 text-right text-green-600 dark:text-green-400">{item.discount ? `${item.discount}%` : '-'}</td>
+                                                      <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-white">
+                                                          {formatCurrency(subtotal, currency)}
+                                                      </td>
+                                                      <td className="py-3 px-4 text-center">
+                                                          <button 
+                                                              onClick={() => handleToggleHoldInView(item.productId, 'hold')}
+                                                              className="px-3 py-1 text-xs font-medium rounded-md transition-colors bg-yellow-400 text-yellow-900 hover:bg-yellow-500 focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800"
+                                                          >
+                                                              Hold
+                                                          </button>
+                                                      </td>
+                                                  </tr>
+                                              )
+                                          })}
+                                      </tbody>
+                                  </table>
+                              </div>
+                          </div>
+
+                          {viewingOrder.backorderedItems && viewingOrder.backorderedItems.length > 0 && (
+                               <div className="pt-4">
+                                  <h4 className="text-md font-semibold text-yellow-600 dark:text-yellow-400 mb-2">Backordered Items</h4>
+                                  <div className="overflow-x-auto border rounded-lg dark:border-slate-700">
+                                      <table className="min-w-full text-sm">
+                                          <thead className="text-xs text-slate-700 uppercase bg-slate-50 dark:bg-slate-700 dark:text-slate-400">
+                                              <tr>
+                                                  <th className="py-2 px-4 text-left">Product</th>
+                                                  <th className="py-2 px-4 text-right">Quantity Held</th>
+                                                  <th className="py-2 px-4 text-center">Actions</th>
+                                              </tr>
+                                          </thead>
+                                          <tbody className="text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
+                                              {(viewingOrder.backorderedItems ?? []).map(item => {
+                                                  const product = products.find(p => p.id === item.productId);
+                                                  if (!product) return null;
+                                                  return (
+                                                      <tr key={item.productId}>
+                                                          <td className="py-3 px-4">
+                                                              <div className="flex items-center space-x-3">
+                                                                  <img src={product.imageUrl} alt={product.name} className="w-10 h-10 rounded-md object-cover" />
+                                                                  <span className="font-medium text-slate-800 dark:text-slate-200">{product.name}</span>
+                                                              </div>
+                                                          </td>
+                                                          <td className="py-3 px-4 text-right font-semibold text-slate-900 dark:text-white">{item.quantity}</td>
+                                                          <td className="py-3 px-4 text-center">
+                                                              <button
+                                                                  onClick={() => handleToggleHoldInView(item.productId, 'unhold')}
+                                                                  className="px-3 py-1 text-xs font-medium rounded-md transition-colors bg-green-500 text-white hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800 disabled:bg-slate-300 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
+                                                                  disabled={!product || product.stock === 0}
+                                                                  title={!product || product.stock === 0 ? 'Item is out of stock' : 'Move to current order'}
+                                                              >
+                                                                  Unhold
+                                                              </button>
+                                                          </td>
+                                                      </tr>
+                                                  )
+                                              })}
+                                          </tbody>
+                                      </table>
+                                  </div>
+                              </div>
+                          )}
+                      </div>
+                      <div className="flex items-center justify-between p-6 border-t border-slate-200 dark:border-slate-600">
+                        <div className="flex-1">
+                            <p className="text-sm text-slate-600 dark:text-slate-300">Grand Total: <span className="font-bold text-slate-900 dark:text-white">{formatCurrency(viewingOrder.total, currency)}</span></p>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                           {canEdit && (
+                                <button onClick={handleSaveBalances} type="button" className="text-white bg-green-600 hover:bg-green-700 focus:ring-4 focus:outline-none focus:ring-green-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center">
+                                    Save Balances
+                                </button>
+                           )}
+                           <button onClick={handleEmailBill} type="button" className="text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
+                                Email Bill
+                            </button>
+                            <button 
+                                onClick={() => {
+                  const customer = customers.find(c => c.id == viewingOrder.customerId);
+                  if (!customer) {
+                    console.warn('Customer lookup failed:', {
+                      viewingOrderCustomerId: viewingOrder.customerId,
+                      availableCustomerIds: customers.map(c => c.id)
+                    });
+                  }
+                  if (viewingOrder.status === OrderStatus.Delivered) {
+                    if (viewingOrder && (customer || viewingOrder.customerName)) {
+                      setIsPrintPreviewOpen(true);
+                    } else {
+                      alert('Order or customer data missing. Cannot print bill.');
+                    }
+                  } else {
+                    setOrderToFinalize(viewingOrder);
+                  }
+                                }} 
+                                type="button" 
+                                className="text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600"
+                            >
+                                {viewingOrder.status === OrderStatus.Delivered ? 'Print Bill Again' : 'Print Bill & Confirm Sale'}
+                            </button>
+                            <button onClick={closeViewModal} type="button" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center">
+                                Close
+                            </button>
+                        </div>
+                      </div>
+                  </Modal>
+              )
+          })()}
+
+          <Modal isOpen={!!orderToFinalize} onClose={() => setOrderToFinalize(null)} title="Confirm Sale & Delivery">
+              <div className="p-6">
+                  <p className="text-slate-600 dark:text-slate-300">This will mark the order as "Delivered", reduce product stock from inventory, and confirm the sale.</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">This action cannot be undone. Do you want to proceed?</p>
+              </div>
+              <div className="flex items-center justify-end p-6 space-x-2 border-t border-slate-200 rounded-b dark:border-slate-600">
+                  <button onClick={() => setOrderToFinalize(null)} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
+                      Cancel
+                  </button>
+                  <button onClick={handleConfirmFinalize} type="button" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700">
+                      Proceed & Print
+                  </button>
+              </div>
+          </Modal>
+
+          {isPrintPreviewOpen && viewingOrder && (
+        <Modal
+          isOpen={isPrintPreviewOpen}
+          onClose={() => setIsPrintPreviewOpen(false)}
+          title={`Print Preview: Order ${viewingOrder.id}`}
+        >
+          <div id="printable-bill-content" className="bg-white">
+            {viewingOrder && customers.find(c => c.id === viewingOrder.customerId) ? (
+              <OrderBill
+                order={viewingOrder}
+                customer={customers.find(c => c.id === viewingOrder.customerId)}
+                products={products}
+                currency={currency}
+                chequeBalance={editableChequeBalance}
+                creditBalance={editableCreditBalance}
+              />
+            ) : (
+              <div className="p-8 text-center text-slate-500">
+                பில் விவரங்கள் கிடைக்கவில்லை. தயவுசெய்து order மற்றும் customer தரவை சரிபார்க்கவும்.
+              </div>
+            )}
+          </div>
+          <div className="flex items-center justify-end p-6 space-x-2 border-t border-slate-200 rounded-b dark:border-slate-600 no-print">
+            <button onClick={() => setIsPrintPreviewOpen(false)} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
+              Cancel
+            </button>
+            <button onClick={() => window.print()} type="button" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center">
+              Confirm Print
+            </button>
+          </div>
+        </Modal>
+          )}
+      </div>
+    </>
+  );
+};
