@@ -61,6 +61,7 @@ export const Drivers: React.FC = () => {
             </div>
         );
     }
+    
 
     const accessibleSuppliers = useMemo(() => {
         if (currentUser?.role === UserRole.Sales && currentUser.assignedSupplierNames) {
