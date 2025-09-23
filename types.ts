@@ -111,7 +111,7 @@ export interface DriverAllocation {
   driverId: string;
   driverName: string;
   date: string; // YYYY-MM-DD
-  allocatedItems: { productId: string; quantity: number }[];
+  allocatedItems: { productId: string; quantity: number; sold?: number }[];
   returnedItems: { productId: string; quantity: number }[] | null;
   salesTotal: number;
   status: 'Allocated' | 'Reconciled';

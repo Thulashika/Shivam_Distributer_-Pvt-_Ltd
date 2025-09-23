@@ -23,18 +23,54 @@ export const updateSupplierDetails = async (supplierId: string, newDetails: Part
 export const fetchProducts = async () => {
   const { data } = await supabase.from('products').select('*');
   if (!data) return [];
+  
+  // Map the raw data to proper Product objects (same as DataContext mapping)
   return data.map((row: any) => ({
-    ...row,
-    imageUrl: row.imageurl ?? row.imageUrl ?? '',
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    price: row.price,
+    stock: row.stock,
+    sku: row.sku,
+    supplier: row.supplier,
+    imageUrl: row.imageurl || row.imageUrl || '',
   }));
 };
 
 export const fetchOrders = async () => {
   const { data } = await supabase.from('orders').select('*');
-  return data;
+  if (!data) return [];
+  
+  // Map the raw data to proper Order objects (same as DataContext mapping)
+  return data.map((row: any) => ({
+    id: row.id,
+    customerId: row.customerid,
+    customerName: row.customername,
+    date: row.orderdate,
+    total: row.totalamount,
+    status: row.status,
+    paymentMethod: row.paymentmethod,
+    notes: row.notes,
+    assignedUserId: row.assigneduserid,
+    orderItems: typeof row.orderitems === 'string' ? JSON.parse(row.orderitems) : (row.orderitems || []),
+    backorderedItems: [],
+    chequeBalance: row.chequebalance == null || isNaN(Number(row.chequebalance)) ? 0 : Number(row.chequebalance),
+    creditBalance: row.creditbalance == null || isNaN(Number(row.creditbalance)) ? 0 : Number(row.creditbalance),
+  }));
 };
 
 export const fetchSuppliers = async () => {
   const { data } = await supabase.from('suppliers').select('*');
-  return data;
+  if (!data) return [];
+  
+  // Map the raw data to proper Supplier objects (same as DataContext mapping)
+  return data.map((row: any) => ({
+    id: row.id,
+    name: row.name,
+    contactPerson: row.contactperson,
+    email: row.email,
+    phone: row.phone,
+    address: row.address,
+    joinDate: row.joindate,
+  }));
 };

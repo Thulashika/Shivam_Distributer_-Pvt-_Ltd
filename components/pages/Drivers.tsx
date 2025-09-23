@@ -7,6 +7,7 @@ import { Modal } from '../ui/Modal';
 import { Badge } from '../ui/Badge';
 import { COMPANY_DETAILS } from '../../constants';
 import { supabase } from '../../supabaseClient';
+import { exportDriverAllocations, exportDriverSales } from '../../utils/exportUtils';
 
 const formatCurrency = (amount: number, currency: string) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2 }).format(amount).replace('$', `${currency} `);
@@ -171,13 +172,45 @@ export const Drivers: React.FC = () => {
             if (data) {
                 const mapped = data.map((row: any) => ({
                     id: row.id,
-                    driverId: row.driverid,
-                    driverName: row.drivername,
+                    driverId: row.driver_id ?? row.driverid,
+                    driverName: row.driver_name ?? row.drivername,
                     date: row.date,
-                    allocatedItems: typeof row.allocateditems === 'string' ? JSON.parse(row.allocateditems) : (row.allocateditems || []),
-                    returnedItems: row.returneditems ? JSON.parse(row.returneditems) : null,
-                    salesTotal: row.salestotal,
-                    status: row.status,
+                    allocatedItems: (() => {
+                        if (row.allocated_items) {
+                            if (typeof row.allocated_items === 'string') {
+                                try { 
+                                    return JSON.parse(row.allocated_items);
+                                } catch { return []; }
+                            }
+                            return row.allocated_items;
+                        }
+                        if (row.allocateditems) {
+                            if (typeof row.allocateditems === 'string') {
+                                try { 
+                                    return JSON.parse(row.allocateditems);
+                                } catch { return []; }
+                            }
+                            return row.allocateditems;
+                        }
+                        return [];
+                    })(),
+                    returnedItems: (() => {
+                        if (row.returned_items) {
+                            if (typeof row.returned_items === 'string') {
+                                try { return JSON.parse(row.returned_items); } catch { return null; }
+                            }
+                            return row.returned_items;
+                        }
+                        if (row.returneditems) {
+                            if (typeof row.returneditems === 'string') {
+                                try { return JSON.parse(row.returneditems); } catch { return null; }
+                            }
+                            return row.returneditems;
+                        }
+                        return null;
+                    })(),
+                    salesTotal: row.sales_total ?? row.salestotal ?? 0,
+                    status: row.status ?? 'Allocated',
                 }));
                 setDriverAllocations(mapped);
             }
@@ -201,25 +234,6 @@ export const Drivers: React.FC = () => {
                     stockChanges[productId] = (stockChanges[productId] || 0) - quantity;
                 });
 
-                // Update product stock in Supabase and UI
-                for (const [productId, change] of Object.entries(stockChanges)) {
-                    const product = products.find((p: Product) => p.id === productId);
-                    if (product) {
-                        const newStock = product.stock + change;
-                        await supabase.from('products').update({ stock: newStock }).eq('id', productId);
-                    }
-                }
-                setProducts(prevProducts => {
-                    const updatedProducts = JSON.parse(JSON.stringify(prevProducts));
-                    Object.entries(stockChanges).forEach(([productId, change]) => {
-                        const productIndex = updatedProducts.findIndex((p: Product) => p.id === productId);
-                        if (productIndex !== -1) {
-                            updatedProducts[productIndex].stock += change;
-                        }
-                    });
-                    return updatedProducts;
-                });
-
                 // Always use the correct DB id for upsert
                 await saveAllocationToDB({
                     ...originalAllocation,
@@ -237,31 +251,16 @@ export const Drivers: React.FC = () => {
                     status: 'Allocated',
                 };
                 await saveAllocationToDB(newAllocation);
-                // Update product stock in Supabase and UI
-                for (const { productId, quantity } of newAllocatedItems) {
-                    const product = products.find(p => p.id === productId);
-                    if (product) {
-                        const newStock = product.stock - quantity;
-                        await supabase.from('products').update({ stock: newStock }).eq('id', productId);
-                    }
-                }
-                setProducts(prevProducts => {
-                    const updatedProducts = [...prevProducts];
-                    newAllocatedItems.forEach(({ productId, quantity }) => {
-                        const productIndex = updatedProducts.findIndex(p => p.id === productId);
-                        if (productIndex !== -1) {
-                            updatedProducts[productIndex].stock -= quantity;
-                        }
-                    });
-                    return updatedProducts;
-                });
             }
             // Always fetch fresh allocations after save
             await fetchAllocationsFromDB();
+            
             // Force main products page to fetch fresh products from Supabase
-            setTimeout(async () => {
+            try {
                 const { data: freshProducts, error: prodError } = await supabase.from('products').select('*');
-                if (!prodError && freshProducts) {
+                if (prodError) {
+                    console.error('Error refreshing products:', prodError);
+                } else if (freshProducts) {
                     setProducts(freshProducts.map((row: any) => ({
                         id: row.id,
                         name: row.name,
@@ -273,8 +272,11 @@ export const Drivers: React.FC = () => {
                         imageUrl: row.imageurl || row.imageUrl || '',
                     })));
                 }
-                handleCloseModal();
-            }, 500);
+            } catch (error) {
+                console.error('Unexpected error refreshing products:', error);
+            }
+            
+            handleCloseModal();
         };
         doSave();
     };
@@ -329,7 +331,24 @@ export const Drivers: React.FC = () => {
             `}</style>
             <div className="flex justify-between items-center">
                 <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">Driver Management</h1>
-                <p className="text-lg text-slate-500 dark:text-slate-400">Date: {todayStr}</p>
+                <div className="flex gap-2 items-center">
+                    {/* Export Buttons */}
+                    <button
+                        onClick={() => exportDriverAllocations(driverAllocations, 'csv')}
+                        className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                        title="Export Allocations as CSV"
+                    >
+                        📊 Allocations CSV
+                    </button>
+                    <button
+                        onClick={() => exportDriverAllocations(driverAllocations, 'xlsx')}
+                        className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                        title="Export Allocations as Excel"
+                    >
+                        📋 Allocations Excel
+                    </button>
+                    <p className="text-lg text-slate-500 dark:text-slate-400">Date: {todayStr}</p>
+                </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -489,17 +508,32 @@ const DailyLog: React.FC<DailyLogProps> = ({ driver, onClose, currency }) => {
     const stockSummary = useMemo(() => {
         if (!allocation) return {};
         const summary: Record<string, { allocated: number; sold: number; remaining: number }> = {};
-        allocation.allocatedItems.forEach(({ productId, quantity }) => {
-            summary[productId] = { allocated: quantity, sold: 0, remaining: quantity };
+        
+        // First, get sold quantities from allocation.allocatedItems.sold field
+        allocation.allocatedItems.forEach(({ productId, quantity, sold }) => {
+            const soldQty = sold || 0; // Use sold field from allocation
+            summary[productId] = { 
+                allocated: quantity, 
+                sold: soldQty, 
+                remaining: quantity - soldQty 
+            };
         });
+        
+        // Also add sold quantities from salesForAllocation as backup
         salesForAllocation.forEach(sale => {
             sale.soldItems.forEach(({ productId, quantity }) => {
                 if (summary[productId]) {
-                    summary[productId].sold += quantity;
-                    summary[productId].remaining = summary[productId].allocated - summary[productId].sold;
+                    // Only add if allocation doesn't have sold field (backward compatibility)
+                    if (!allocation.allocatedItems.find(item => item.productId === productId && item.sold)) {
+                        summary[productId].sold += quantity;
+                        summary[productId].remaining = summary[productId].allocated - summary[productId].sold;
+                    }
                 }
             });
         });
+        
+        console.log('Debug - Stock summary calculated:', summary);
+        
         // Only show products not fully delivered
         Object.keys(summary).forEach(productId => {
             if (summary[productId].remaining <= 0) {
@@ -571,58 +605,172 @@ const DailyLog: React.FC<DailyLogProps> = ({ driver, onClose, currency }) => {
 
         setDriverSales(prev => [newSale, ...prev]);
 
-        // Patch: Insert delivered products into driver_deliveries table and update driver_allocations product-wise
+        // Insert the sale into the database
         (async () => {
-            for (const item of itemsToSell) {
-                const payload = {
-                    id: crypto.randomUUID(),
-                    driver_id: driver.id,
-                    product_id: item.productId,
-                    quantity: item.quantity,
-                    delivered_at: todayStr
+            try {
+                // Insert into driver_sales table
+                const { error: salesError } = await supabase.from('driver_sales').insert([{
+                    id: newSale.id,
+                    driver_id: newSale.driverId,
+                    allocation_id: newSale.allocationId,
+                    date: newSale.date,
+                    sold_items: JSON.stringify(newSale.soldItems),
+                    total: newSale.total,
+                    customer_name: newSale.customerName,
+                    customer_id: newSale.customerId,
+                    amount_paid: newSale.amountPaid,
+                    credit_amount: newSale.creditAmount,
+                    payment_method: newSale.paymentMethod,
+                    payment_reference: newSale.paymentReference,
+                    notes: newSale.notes,
+                }]);
+
+                if (salesError) {
+                    console.error('Error inserting driver sale:', salesError);
+                    return;
+                }
+
+                // Insert into driver_deliveries table for each sold item
+                for (const item of itemsToSell) {
+                    const { error: deliveryError } = await supabase.from('driver_deliveries').insert([{
+                        id: crypto.randomUUID(),
+                        driver_id: driver.id,
+                        product_id: item.productId,
+                        quantity: item.quantity,
+                        delivered_at: todayStr
+                    }]);
+
+                    if (deliveryError) {
+                        console.error('Error inserting driver delivery:', deliveryError);
+                    }
+                }
+
+                // Update driver allocation with sales data
+                const updatedAllocatedItems = allocation.allocatedItems.map(item => {
+                    const delivered = itemsToSell.find(sold => sold.productId === item.productId);
+                    if (delivered) {
+                        return {
+                            productId: item.productId,
+                            quantity: Math.max(0, item.quantity - delivered.quantity),
+                            sold: (item.sold || 0) + delivered.quantity
+                        };
+                    }
+                    return item;
+                });
+
+                console.log('Debug - Before update:', allocation.allocatedItems);
+                console.log('Debug - Updated items:', updatedAllocatedItems);
+
+                let totalSales = 0;
+                updatedAllocatedItems.forEach(item => {
+                    const product = products.find(p => p.id === item.productId);
+                    if (product) {
+                        totalSales += (item.sold || 0) * product.price;
+                    }
+                });
+
+                const updatePayload = {
+                    allocated_items: JSON.stringify(updatedAllocatedItems),
+                    allocateditems: JSON.stringify(updatedAllocatedItems), // Update both columns for compatibility
+                    sales_total: totalSales,
+                    salestotal: totalSales, // Update both columns for compatibility  
+                    status: 'Delivered'
                 };
-                await supabase.from('driver_deliveries').insert([payload]);
-            }
-            // Update allocatedItems: reduce quantity for delivered products
-            const updatedAllocatedItems = allocation.allocatedItems.map(item => {
-                const delivered = itemsToSell.find(sold => sold.productId === item.productId);
-                if (delivered) {
-                    return {
-                        productId: item.productId,
-                        quantity: Math.max(0, item.quantity - delivered.quantity),
-                        sold: (item.sold || 0) + delivered.quantity
-                    };
+                
+                console.log('Debug - Update payload:', updatePayload);
+
+                const { error: updateError } = await supabase.from('driver_allocations').update(updatePayload).eq('id', allocation.id);
+
+                if (updateError) {
+                    console.error('Error updating driver allocation:', updateError);
+                    return;
+                } else {
+                    console.log('Debug - Allocation updated successfully');
                 }
-                return item;
-            });
-            // Update sales_total driver-wise, product-wise
-            let totalSales = 0;
-            updatedAllocatedItems.forEach(item => {
-                const product = products.find(p => p.id === item.productId);
-                if (product) {
-                    totalSales += (item.sold || 0) * product.price;
+
+                // Refresh allocations from database
+                const { data: freshAllocations } = await supabase.from('driver_allocations').select('*');
+                if (freshAllocations) {
+                    setDriverAllocations(freshAllocations.map((row: any) => ({
+                        id: row.id,
+                        driverId: row.driver_id ?? row.driverid,
+                        driverName: row.driver_name ?? row.drivername,
+                        date: row.date,
+                        allocatedItems: (() => {
+                            if (row.allocated_items) {
+                                if (typeof row.allocated_items === 'string') {
+                                    try { return JSON.parse(row.allocated_items); } catch { return []; }
+                                }
+                                return row.allocated_items;
+                            }
+                            if (row.allocateditems) {
+                                if (typeof row.allocateditems === 'string') {
+                                    try { return JSON.parse(row.allocateditems); } catch { return []; }
+                                }
+                                return row.allocateditems;
+                            }
+                            return [];
+                        })(),
+                        returnedItems: (() => {
+                            if (row.returned_items) {
+                                if (typeof row.returned_items === 'string') {
+                                    try { return JSON.parse(row.returned_items); } catch { return null; }
+                                }
+                                return row.returned_items;
+                            }
+                            if (row.returneditems) {
+                                if (typeof row.returneditems === 'string') {
+                                    try { return JSON.parse(row.returneditems); } catch { return null; }
+                                }
+                                return row.returneditems;
+                            }
+                            return null;
+                        })(),
+                        salesTotal: row.sales_total ?? row.salestotal ?? 0,
+                        status: row.status ?? 'Allocated',
+                    })));
                 }
-            });
-            await supabase.from('driver_allocations').update({
-                allocated_items: JSON.stringify(updatedAllocatedItems),
-                salestotal: totalSales,
-                status: 'Delivered'
-            }).eq('id', allocation.id);
-            const { data: freshAllocations } = await supabase.from('driver_allocations').select('*');
-            if (freshAllocations) {
-                setDriverAllocations(freshAllocations.map((row: any) => ({
-                    id: row.id,
-                    driverId: row.driverid,
-                    driverName: row.drivername,
-                    date: row.date,
-                    allocatedItems: typeof row.allocateditems === 'string' ? JSON.parse(row.allocateditems) : (row.allocateditems || []),
-                    returnedItems: row.returneditems ? JSON.parse(row.returneditems) : null,
-                    salesTotal: row.salestotal,
-                    status: row.status,
-                })));
+
+                // Update inventory (products table) - reduce stock for sold items
+                for (const item of itemsToSell) {
+                    const currentProduct = products.find(p => p.id === item.productId);
+                    if (currentProduct) {
+                        const newStock = Math.max(0, currentProduct.stock - item.quantity);
+                        const { error: inventoryError } = await supabase.from('products').update({
+                            stock: newStock
+                        }).eq('id', item.productId);
+
+                        if (inventoryError) {
+                            console.error('Error updating product inventory:', inventoryError);
+                        } else {
+                            console.log(`Debug - Updated inventory for ${item.productId}: ${currentProduct.stock} → ${newStock}`);
+                        }
+                    }
+                }
+
+                // Refresh products from database to get updated stock levels
+                const { data: freshProducts } = await supabase.from('products').select('*');
+                if (freshProducts) {
+                    const mappedProducts = freshProducts.map((row: any) => ({
+                        id: row.id,
+                        name: row.name,
+                        category: row.category,
+                        price: row.price,
+                        stock: row.stock,
+                        sku: row.sku,
+                        supplier: row.supplier,
+                        imageUrl: row.imageurl || row.imageUrl || '',
+                    }));
+                    setProducts(mappedProducts);
+                    console.log('Debug - Product inventory refreshed');
+                }
+
+            } catch (error) {
+                console.error('Error processing sale:', error);
             }
         })();
 
+        // Update credit balance for customer if applicable
         if (saleCustomer.id && creditAmount > 0) {
             setCustomers(prev => prev.map(c => 
                 c.id === saleCustomer.id
@@ -687,13 +835,45 @@ const DailyLog: React.FC<DailyLogProps> = ({ driver, onClose, currency }) => {
             if (freshAllocations) {
                 setDriverAllocations(freshAllocations.map((row: any) => ({
                     id: row.id,
-                    driverId: row.driverid,
-                    driverName: row.drivername,
+                    driverId: row.driver_id ?? row.driverid,
+                    driverName: row.driver_name ?? row.drivername,
                     date: row.date,
-                    allocatedItems: typeof row.allocateditems === 'string' ? JSON.parse(row.allocateditems) : (row.allocateditems || []),
-                    returnedItems: row.returneditems ? JSON.parse(row.returneditems) : null,
-                    salesTotal: row.salestotal,
-                    status: row.status,
+                    allocatedItems: (() => {
+                        if (row.allocated_items) {
+                            if (typeof row.allocated_items === 'string') {
+                                try { 
+                                    return JSON.parse(row.allocated_items);
+                                } catch { return []; }
+                            }
+                            return row.allocated_items;
+                        }
+                        if (row.allocateditems) {
+                            if (typeof row.allocateditems === 'string') {
+                                try { 
+                                    return JSON.parse(row.allocateditems);
+                                } catch { return []; }
+                            }
+                            return row.allocateditems;
+                        }
+                        return [];
+                    })(),
+                    returnedItems: (() => {
+                        if (row.returned_items) {
+                            if (typeof row.returned_items === 'string') {
+                                try { return JSON.parse(row.returned_items); } catch { return null; }
+                            }
+                            return row.returned_items;
+                        }
+                        if (row.returneditems) {
+                            if (typeof row.returneditems === 'string') {
+                                try { return JSON.parse(row.returneditems); } catch { return null; }
+                            }
+                            return row.returneditems;
+                        }
+                        return null;
+                    })(),
+                    salesTotal: row.sales_total ?? row.salestotal ?? 0,
+                    status: row.status ?? 'Allocated',
                 })));
             }
             const { data: freshProducts } = await supabase.from('products').select('*');
@@ -781,8 +961,6 @@ const DailyLog: React.FC<DailyLogProps> = ({ driver, onClose, currency }) => {
                                 <tr>
                                     <th className="py-2 px-4 text-left">Product</th>
                                     <th className="py-2 px-4 text-center">Allocated</th>
-                                    <th className="py-2 px-4 text-center">Sold</th>
-                                    <th className="py-2 px-4 text-center">Expected Return</th>
                                     <th className="py-2 px-4 text-center">Actual Returned</th>
                                 </tr>
                             </thead>
@@ -795,8 +973,6 @@ const DailyLog: React.FC<DailyLogProps> = ({ driver, onClose, currency }) => {
                                         <tr key={productId}>
                                             <td className="py-3 px-4 font-medium text-slate-900 dark:text-white">{product.name}</td>
                                             <td className="py-3 px-4 text-center">{s.allocated}</td>
-                                            <td className="py-3 px-4 text-center">{s.sold}</td>
-                                            <td className="py-3 px-4 text-center font-bold text-blue-600 dark:text-blue-400">{s.remaining}</td>
                                             <td className={`py-1 px-4 text-center ${discrepancy ? 'bg-red-100 dark:bg-red-900/50' : ''}`}>
                                                 <input
                                                     type="number"

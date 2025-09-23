@@ -6,6 +6,11 @@ declare global {
 import React, { createContext, useState, ReactNode, useContext, Dispatch, SetStateAction } from 'react';
 import { User, Product, Order, Customer, DriverAllocation, DriverSale, Supplier } from '../types';
 import { supabase } from '../supabaseClient';
+import { 
+    DatabaseOrder, 
+    DatabaseDriverAllocation, 
+    safeJsonParse 
+} from '../database-types';
 
 interface DataContextType {
   users: User[];
@@ -69,21 +74,29 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                 console.error('Supabase orders fetch error:', ordersError);
             }
             if (!ordersError && ordersData) {
-                const mappedOrders = ordersData.map((row: any) => ({
-                    id: row.id,
-                    customerId: row.customerid,
-                    customerName: row.customername,
-                    date: row.orderdate,
-                    total: row.totalamount,
-                    status: row.status,
-                    paymentMethod: row.paymentmethod,
-                    notes: row.notes,
-                    assignedUserId: row.assigneduserid,
-                    orderItems: typeof row.orderitems === 'string' ? JSON.parse(row.orderitems) : (row.orderitems || []),
-                    backorderedItems: [],
-                    chequeBalance: row.chequebalance == null || isNaN(Number(row.chequebalance)) ? 0 : Number(row.chequebalance),
-                    creditBalance: row.creditbalance == null || isNaN(Number(row.creditbalance)) ? 0 : Number(row.creditbalance),
-                }));
+                const mappedOrders = ordersData.map((row: DatabaseOrder) => {
+                    const orderItemsResult = safeJsonParse(row.orderitems, [], 'orderitems', row.id);
+                    if (!orderItemsResult.success) {
+                        // Log error but continue with fallback
+                        console.warn(`Using empty array for order items in order ${row.id}`);
+                    }
+
+                    return {
+                        id: row.id,
+                        customerId: row.customerid,
+                        customerName: row.customername,
+                        date: row.orderdate,
+                        total: row.totalamount,
+                        status: row.status,
+                        paymentMethod: row.paymentmethod,
+                        notes: row.notes,
+                        assignedUserId: row.assigneduserid,
+                        orderItems: orderItemsResult.success ? orderItemsResult.data : [],
+                        backorderedItems: [],
+                        chequeBalance: row.chequebalance == null || isNaN(Number(row.chequebalance)) ? 0 : Number(row.chequebalance),
+                        creditBalance: row.creditbalance == null || isNaN(Number(row.creditbalance)) ? 0 : Number(row.creditbalance),
+                    } as Order;
+                });
                 setOrders(mappedOrders);
             }
             // Products table fetch mapping
@@ -128,36 +141,65 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                         }));
                         setter(mappedSuppliers);
                     } else if (name === 'driver_allocations') {
+                        console.log('Debug - Raw driver_allocations data from DB:', data);
+                        console.log('Debug - Driver_allocations error:', error);
                         const mappedAllocations = data.map((row: any) => ({
                             id: row.id,
                             driverId: row.driver_id ?? row.driverid,
                             driverName: row.driver_name ?? row.drivername,
                             date: row.date,
                             allocatedItems: (() => {
+                                console.log(`Debug - Row ${row.id} allocated_items:`, row.allocated_items);
+                                console.log(`Debug - Row ${row.id} allocateditems:`, row.allocateditems);
+                                
+                                const parseJsonSafely = (jsonString: string, fieldName: string, rowId: string) => {
+                                    try {
+                                        const parsed = JSON.parse(jsonString);
+                                        console.log(`Debug - Successfully parsed ${fieldName} for ${rowId}:`, parsed);
+                                        return Array.isArray(parsed) ? parsed : [];
+                                    } catch (error) {
+                                        console.error(`Error parsing ${fieldName} for row ${rowId}:`, error);
+                                        console.error(`Raw data that failed to parse:`, jsonString);
+                                        return [];
+                                    }
+                                };
+                                
                                 if (row.allocated_items) {
                                     if (typeof row.allocated_items === 'string') {
-                                        try { return JSON.parse(row.allocated_items); } catch { return []; }
+                                        return parseJsonSafely(row.allocated_items, 'allocated_items', row.id);
                                     }
-                                    return row.allocated_items;
+                                    return Array.isArray(row.allocated_items) ? row.allocated_items : [];
                                 }
                                 if (row.allocateditems) {
                                     if (typeof row.allocateditems === 'string') {
-                                        try { return JSON.parse(row.allocateditems); } catch { return []; }
+                                        return parseJsonSafely(row.allocateditems, 'allocateditems', row.id);
                                     }
-                                    return row.allocateditems;
+                                    return Array.isArray(row.allocateditems) ? row.allocateditems : [];
                                 }
                                 return [];
                             })(),
                             returnedItems: (() => {
+                                const parseJsonSafely = (jsonString: string, fieldName: string, rowId: string) => {
+                                    try {
+                                        const parsed = JSON.parse(jsonString);
+                                        console.log(`Debug - Successfully parsed ${fieldName} for ${rowId}:`, parsed);
+                                        return parsed;
+                                    } catch (error) {
+                                        console.error(`Error parsing ${fieldName} for row ${rowId}:`, error);
+                                        console.error(`Raw data that failed to parse:`, jsonString);
+                                        return null;
+                                    }
+                                };
+                                
                                 if (row.returned_items) {
                                     if (typeof row.returned_items === 'string') {
-                                        try { return JSON.parse(row.returned_items); } catch { return null; }
+                                        return parseJsonSafely(row.returned_items, 'returned_items', row.id);
                                     }
                                     return row.returned_items;
                                 }
                                 if (row.returneditems) {
                                     if (typeof row.returneditems === 'string') {
-                                        try { return JSON.parse(row.returneditems); } catch { return null; }
+                                        return parseJsonSafely(row.returneditems, 'returneditems', row.id);
                                     }
                                     return row.returneditems;
                                 }
@@ -166,7 +208,40 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
                             salesTotal: row.sales_total ?? row.salestotal ?? 0,
                             status: row.status ?? 'Allocated',
                         }));
+                        console.log('Debug - Mapped driver allocations:', mappedAllocations);
                         setter(mappedAllocations);
+                    } else if (name === 'users') {
+                        const mappedUsers = data.map((row: any) => ({
+                            id: row.id,
+                            name: row.name,
+                            email: row.email,
+                            phone: row.phone,
+                            role: row.role,
+                            status: row.status,
+                            avatarUrl: row.avatarurl ?? '',
+                            lastLogin: row.lastlogin,
+                            password: row.password,
+                            assignedSupplierNames: row.assignedsuppliernames ?? [],
+                            settings: row.settings ?? {},
+                        }));
+                        setter(mappedUsers);
+                    } else if (name === 'driver_sales') {
+                        const mappedSales = data.map((row: any) => ({
+                            id: row.id,
+                            driverId: row.driver_id,
+                            allocationId: row.allocation_id,
+                            date: row.date,
+                            soldItems: typeof row.sold_items === 'string' ? JSON.parse(row.sold_items) : (row.sold_items || []),
+                            total: row.total || 0,
+                            customerName: row.customer_name,
+                            customerId: row.customer_id,
+                            amountPaid: row.amount_paid || 0,
+                            creditAmount: row.credit_amount || 0,
+                            paymentMethod: row.payment_method,
+                            paymentReference: row.payment_reference,
+                            notes: row.notes,
+                        }));
+                        setter(mappedSales);
                     } else if (name === 'users') {
                         const mappedUsers = data.map((row: any) => ({
                             id: row.id,
@@ -189,9 +264,13 @@ export const DataProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
             }
         };
         fetchData();
-    // Expose driverAllocations globally for driver order filtering
-    (window as any).driverAllocations = driverAllocations;
     }, []);
+
+    // Expose driverAllocations globally for driver order filtering whenever it changes
+    React.useEffect(() => {
+        (window as any).driverAllocations = driverAllocations;
+        console.log('Debug - Window driverAllocations updated:', driverAllocations.length, 'allocations');
+    }, [driverAllocations]);
 
     const value = {
         users, setUsers,

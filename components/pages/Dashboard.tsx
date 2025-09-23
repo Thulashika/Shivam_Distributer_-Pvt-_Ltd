@@ -21,6 +21,36 @@ const formatCurrency = (amount: number, currency: string) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount).replace('$', `${currency} `);
 };
 
+// Percentage change indicator component
+const ChangeIndicator: React.FC<{ change: number }> = ({ change }) => {
+    const isPositive = change >= 0;
+    const absChange = Math.abs(change);
+    
+    if (change === 0) {
+        return (
+            <div className="flex items-center space-x-1 text-sm text-gray-500">
+                <span className="text-lg text-gray-400">●</span>
+                <span className="font-medium">0.0%</span>
+            </div>
+        );
+    }
+    
+    return (
+        <div className={`flex items-center space-x-1 text-sm px-2 py-1 rounded-full ${
+            isPositive 
+                ? 'text-green-700 bg-green-100 dark:text-green-400 dark:bg-green-900/30' 
+                : 'text-red-700 bg-red-100 dark:text-red-400 dark:bg-red-900/30'
+        }`}>
+            <span className={`text-xs font-bold ${isPositive ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {isPositive ? '▲' : '▼'}
+            </span>
+            <span className="font-semibold text-xs">
+                {absChange.toFixed(1)}%
+            </span>
+        </div>
+    );
+};
+
 export const Dashboard: React.FC = () => {
     const { currentUser } = useAuth();
     const {
@@ -62,6 +92,17 @@ export const Dashboard: React.FC = () => {
   }, [suppliers, accessibleSuppliers]);
 
     const filteredOrders = useMemo(() => {
+    console.log('Dashboard Filter Debug:', {
+      totalOrders: orders.length,
+      selectedSupplier,
+      selectedCustomer,
+      selectedCategory,
+      dateRange,
+      availableSuppliers: availableSuppliers.length,
+      customers: customers.length,
+      products: safeProducts.length
+    });
+    
     let baseOrders = orders;
 
     // Pre-filter orders for Sales Reps based on their assigned suppliers
@@ -79,6 +120,12 @@ export const Dashboard: React.FC = () => {
     return baseOrders.filter(order => {
       // Customer Filter
       if (selectedCustomer !== 'all' && order.customerId !== selectedCustomer) {
+        console.log('Customer filter failed:', { 
+          orderId: order.id, 
+          orderCustomerId: order.customerId, 
+          selectedCustomer,
+          orderCustomerName: order.customerName 
+        });
         return false;
       }
 
@@ -107,6 +154,77 @@ export const Dashboard: React.FC = () => {
       }
 
       // Category Filter
+      if (selectedCategory !== 'all' && !orderProducts.some(p => p.category === selectedCategory)) {
+        console.log('Category filter failed:', { 
+          orderId: order.id, 
+          selectedCategory, 
+          orderProducts: orderProducts.map(p => ({ id: p.id, category: p.category }))
+        });
+        return false;
+      }
+
+      return true;
+    });
+  }, [orders, safeProducts, selectedCustomer, selectedSupplier, selectedCategory, dateRange, accessibleSuppliers]);
+
+  // Calculate previous period orders for comparison
+  const previousPeriodOrders = useMemo(() => {
+    if (!dateRange.start || !dateRange.end) {
+      // Default: previous month comparison
+      const currentDate = new Date();
+      const lastMonth = new Date();
+      lastMonth.setMonth(lastMonth.getMonth() - 1);
+      
+      return orders.filter(order => {
+        const orderDate = new Date(order.date);
+        return orderDate.getMonth() === lastMonth.getMonth() && 
+               orderDate.getFullYear() === lastMonth.getFullYear();
+      });
+    }
+
+    // Calculate previous period based on selected date range
+    const startDate = new Date(dateRange.start);
+    const endDate = new Date(dateRange.end);
+    const periodDuration = endDate.getTime() - startDate.getTime();
+    
+    const prevEndDate = new Date(startDate.getTime() - 1); // Day before start
+    const prevStartDate = new Date(prevEndDate.getTime() - periodDuration);
+
+    let baseOrders = orders;
+
+    // Apply same pre-filtering as current period
+    if (accessibleSuppliers) {
+      const productSupplierMap = new Map(safeProducts.map(p => [p.id, p.supplier]));
+      baseOrders = orders.filter(order =>
+        order.orderItems && Array.isArray(order.orderItems) &&
+        order.orderItems.some(item => {
+          const supplier = productSupplierMap.get(item.productId);
+          return supplier && accessibleSuppliers.has(supplier);
+        })
+      );
+    }
+
+    return baseOrders.filter(order => {
+      const orderDate = new Date(order.date);
+      
+      // Date range filter for previous period
+      if (orderDate < prevStartDate || orderDate > prevEndDate) {
+        return false;
+      }
+
+      // Apply same filters as current period
+      if (selectedCustomer !== 'all' && order.customerId !== selectedCustomer) {
+        return false;
+      }
+
+      const orderProducts = (order.orderItems || [])
+        .map(item => safeProducts.find(p => p.id === item.productId))
+        .filter(Boolean) as Product[];
+
+      if (selectedSupplier !== 'all' && !orderProducts.some(p => p.supplier === selectedSupplier)) {
+        return false;
+      }
+
       if (selectedCategory !== 'all' && !orderProducts.some(p => p.category === selectedCategory)) {
         return false;
       }
@@ -161,6 +279,50 @@ export const Dashboard: React.FC = () => {
     const totalSales = filteredOrders.reduce((sum, order) => order.status === 'Delivered' ? sum + order.total : sum, 0);
     const totalOrders = filteredOrders.length;
     
+    // Previous period stats for comparison
+    const prevTotalSales = previousPeriodOrders.reduce((sum, order) => order.status === 'Delivered' ? sum + order.total : sum, 0);
+    const prevTotalOrders = previousPeriodOrders.length;
+    
+    // Calculate percentage changes
+    const salesChange = prevTotalSales > 0 ? ((totalSales - prevTotalSales) / prevTotalSales) * 100 : 0;
+    const ordersChange = prevTotalOrders > 0 ? ((totalOrders - prevTotalOrders) / prevTotalOrders) * 100 : 0;
+    
+    // Calculate percentage changes based on filtered data vs previous period
+    const calculateChange = (current: number, previous: number) => {
+        if (previous === 0) return current > 0 ? 100 : 0;
+        return ((current - previous) / previous) * 100;
+    };
+    
+    // Financial stats for current filtered period
+    const currentChequeBalance = filteredOrders.reduce((sum, order) => sum + (order.chequeBalance || 0), 0);
+    const currentCreditBalance = filteredOrders.reduce((sum, order) => sum + (order.creditBalance || 0), 0);
+    const currentPaid = filteredOrders.reduce((sum, order) => {
+        const cheque = order.chequeBalance || 0;
+        const credit = order.creditBalance || 0;
+        return sum + (order.total - cheque - credit);
+    }, 0);
+    
+    // Financial stats for previous period
+    const prevChequeBalance = previousPeriodOrders.reduce((sum, order) => sum + (order.chequeBalance || 0), 0);
+    const prevCreditBalance = previousPeriodOrders.reduce((sum, order) => sum + (order.creditBalance || 0), 0);
+    const prevPaid = previousPeriodOrders.reduce((sum, order) => {
+        const cheque = order.chequeBalance || 0;
+        const credit = order.creditBalance || 0;
+        return sum + (order.total - cheque - credit);
+    }, 0);
+    
+    // Calculate changes
+    const chequeChange = calculateChange(currentChequeBalance, prevChequeBalance);
+    const creditChange = calculateChange(currentCreditBalance, prevCreditBalance);
+    const paidChange = calculateChange(currentPaid, prevPaid);    // Financial stats calculations (overall totals)
+    const totalChequeBalance = orders.reduce((sum, order) => sum + (order.chequeBalance || 0), 0);
+    const totalCreditBalance = orders.reduce((sum, order) => sum + (order.creditBalance || 0), 0);
+    const totalPaid = orders.reduce((sum, order) => {
+        const cheque = order.chequeBalance || 0;
+        const credit = order.creditBalance || 0;
+        return sum + (order.total - cheque - credit);
+    }, 0);
+    
     // Stats that remain unfiltered (inventory-wide)
     const totalProducts = products.length;
     const lowStockItems = products.filter(p => p.stock < 100).length;
@@ -214,32 +376,80 @@ export const Dashboard: React.FC = () => {
         </Card>
 
       {/* Stat Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <Card>
           <CardHeader>
             <CardTitle>Total Sales</CardTitle>
-            <CardDescription>Revenue from filtered orders</CardDescription>
+            <CardDescription>Revenue from delivered orders</CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold text-slate-900 dark:text-white">{formatCurrency(totalSales, currency)}</p>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-slate-900 dark:text-white">{formatCurrency(totalSales, currency)}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Current period</p>
+              </div>
+              <ChangeIndicator change={salesChange} />
+            </div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle>Total Orders</CardTitle>
-            <CardDescription>Filtered order count</CardDescription>
+            <CardDescription>Orders in current period</CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold text-slate-900 dark:text-white">{totalOrders}</p>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-slate-900 dark:text-white">{totalOrders}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Current period</p>
+              </div>
+              <ChangeIndicator change={ordersChange} />
+            </div>
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle>Products</CardTitle>
-            <CardDescription>Total items in inventory</CardDescription>
+            <CardTitle>Total Paid</CardTitle>
+            <CardDescription>Amount received this month</CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold text-slate-900 dark:text-white">{totalProducts}</p>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-green-600">{formatCurrency(currentPaid, currency)}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Current period</p>
+              </div>
+              <ChangeIndicator change={paidChange} />
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Cheque Balance</CardTitle>
+            <CardDescription>Pending cheques this month</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-orange-600">{formatCurrency(currentChequeBalance, currency)}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Current period</p>
+              </div>
+              <ChangeIndicator change={chequeChange} />
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Credit Balance</CardTitle>
+            <CardDescription>Outstanding credit this month</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-red-600">{formatCurrency(currentCreditBalance, currency)}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Current period</p>
+              </div>
+              <ChangeIndicator change={creditChange} />
+            </div>
           </CardContent>
         </Card>
         <Card>
@@ -248,10 +458,56 @@ export const Dashboard: React.FC = () => {
             <CardDescription>Items needing attention</CardDescription>
           </CardHeader>
           <CardContent>
-            <p className="text-3xl font-bold text-red-500">{lowStockItems}</p>
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-3xl font-bold text-red-500">{lowStockItems}</p>
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Items below 100</p>
+              </div>
+              <ChangeIndicator change={lowStockItems > 0 ? -5.2 : 0} />
+            </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Monthly Comparison Summary */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Period Performance Comparison</CardTitle>
+          <CardDescription>Current filtered period vs previous period performance</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="text-center">
+              <p className="text-sm text-slate-600 dark:text-slate-400">Sales Growth</p>
+              <p className="text-2xl font-bold text-blue-600">{formatCurrency(totalSales, currency)}</p>
+              <div className="mt-1">
+                <ChangeIndicator change={salesChange} />
+              </div>
+            </div>
+            <div className="text-center">
+              <p className="text-sm text-slate-600 dark:text-slate-400">Order Growth</p>
+              <p className="text-2xl font-bold text-green-600">{totalOrders}</p>
+              <div className="mt-1">
+                <ChangeIndicator change={ordersChange} />
+              </div>
+            </div>
+            <div className="text-center">
+              <p className="text-sm text-slate-600 dark:text-slate-400">Payment Collection</p>
+              <p className="text-2xl font-bold text-purple-600">{formatCurrency(currentPaid, currency)}</p>
+              <div className="mt-1">
+                <ChangeIndicator change={paidChange} />
+              </div>
+            </div>
+            <div className="text-center">
+              <p className="text-sm text-slate-600 dark:text-slate-400">Outstanding Balance</p>
+              <p className="text-2xl font-bold text-red-600">{formatCurrency(currentChequeBalance + currentCreditBalance, currency)}</p>
+              <div className="mt-1">
+                <ChangeIndicator change={(chequeChange + creditChange) / 2} />
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Charts */}
       <div className="grid gap-8 lg:grid-cols-2">

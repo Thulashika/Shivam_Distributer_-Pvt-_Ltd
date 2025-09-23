@@ -7,6 +7,7 @@ import { COMPANY_DETAILS } from '../../constants';
 import { useData } from '../../contexts/DataContext';
 import { supabase, fetchOrders } from '../../supabaseClient';
 import { useAuth } from '../../contexts/AuthContext';
+import { exportOrders } from '../../utils/exportUtils';
 
 const formatCurrency = (amount: number, currency: string) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2 }).format(amount).replace('$', `${currency} `);
@@ -157,12 +158,13 @@ export const Orders: React.FC = () => {
   const [orderNotes, setOrderNotes] = useState('');
   const [orderMethod, setOrderMethod] = useState('');
   // ...existing code...
-  const { orders, setOrders, customers, products, setProducts, users } = useData();
+  const { orders, setOrders, customers, products, setProducts, users, driverAllocations } = useData();
   const { currentUser } = useAuth();
   const currency = currentUser?.settings.currency || 'LKR';
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<OrderStatus | 'all'>('all');
+  const [productSearchTerm, setProductSearchTerm] = useState('');
   
   const [modalState, setModalState] = useState<'closed' | 'create' | 'edit'>('closed');
   const [currentOrder, setCurrentOrder] = useState<Order | null>(null);
@@ -179,6 +181,7 @@ export const Orders: React.FC = () => {
 
   const [editableChequeBalance, setEditableChequeBalance] = useState<number>(0);
   const [editableCreditBalance, setEditableCreditBalance] = useState<number>(0);
+  const [editableAmountPaid, setEditableAmountPaid] = useState<number>(0);
 
   const canEdit = useMemo(() => 
     currentUser?.role === UserRole.Admin || 
@@ -202,6 +205,36 @@ export const Orders: React.FC = () => {
     return null; // null means all access for Admin/Manager
   }, [currentUser]);
 
+  // Helper function to get driver allocated stock for a product
+  const getDriverAllocatedStock = (productId: string): number => {
+    if (currentUser?.role !== UserRole.Driver) {
+      return 0; // Non-drivers don't have allocated stock
+    }
+    
+    const todayStr = new Date().toISOString().split('T')[0];
+    const driverAllocation = driverAllocations.find(
+      allocation => allocation.driverId === currentUser.id && allocation.date === todayStr
+    );
+    
+    if (!driverAllocation) {
+      return 0; // No allocation for today
+    }
+    
+    const allocatedItem = driverAllocation.allocatedItems.find(
+      item => item.productId === productId
+    );
+    
+    return allocatedItem ? allocatedItem.quantity : 0;
+  };
+
+  // Helper function to get effective stock (driver allocation or warehouse stock)
+  const getEffectiveStock = (product: Product): number => {
+    if (currentUser?.role === UserRole.Driver) {
+      return getDriverAllocatedStock(product.id);
+    }
+    return product.stock; // For non-drivers, show warehouse stock
+  };
+
   useEffect(() => {
     if (modalState === 'create') {
         const customer = customers.find(c => c.id === selectedCustomer);
@@ -217,9 +250,25 @@ export const Orders: React.FC = () => {
   }, [selectedCustomer, modalState, customers, products]);
 
   const availableProductsForOrder = useMemo(() => {
-    if (!accessibleSuppliers) return products;
-    return products.filter(p => accessibleSuppliers.has(p.supplier));
-  }, [products, accessibleSuppliers]);
+    let filteredProducts = products;
+    
+    // Role-based filtering
+    if (accessibleSuppliers) {
+      filteredProducts = filteredProducts.filter(p => accessibleSuppliers.has(p.supplier));
+    }
+    
+    // Search filtering for product modal
+    if (productSearchTerm.trim()) {
+      const searchLower = productSearchTerm.toLowerCase();
+      filteredProducts = filteredProducts.filter(product =>
+        product.name.toLowerCase().includes(searchLower) ||
+        product.category.toLowerCase().includes(searchLower) ||
+        product.sku.toLowerCase().includes(searchLower)
+      );
+    }
+    
+    return filteredProducts;
+  }, [products, accessibleSuppliers, productSearchTerm]);
 
   const filteredOrders = useMemo(() => {
     let displayOrders = [...orders];
@@ -332,6 +381,7 @@ export const Orders: React.FC = () => {
   const closeModal = () => {
     setModalState('closed');
     setCurrentOrder(null);
+    setProductSearchTerm(''); // Clear product search when modal closes
   };
 
   const openDeleteModal = (order: Order) => {
@@ -351,6 +401,8 @@ export const Orders: React.FC = () => {
     setViewingOrder(patchedOrder);
     setEditableChequeBalance(patchedOrder.chequeBalance || 0);
     setEditableCreditBalance(patchedOrder.creditBalance || 0);
+    const calculatedAmountPaid = patchedOrder.total - (patchedOrder.chequeBalance || 0) - (patchedOrder.creditBalance || 0);
+    setEditableAmountPaid(calculatedAmountPaid > 0 ? calculatedAmountPaid : 0);
   };
 
   const closeViewModal = () => {
@@ -362,7 +414,7 @@ export const Orders: React.FC = () => {
     if (!product) return;
     
     const isHeld = heldItems.has(productId);
-    const maxQuantity = product.stock > 0 && !isHeld ? product.stock : Infinity;
+    const maxQuantity = getEffectiveStock(product) > 0 && !isHeld ? getEffectiveStock(product) : Infinity;
     const newQuantity = Math.max(0, Math.min(quantity, maxQuantity));
     setOrderItems(prev => ({ ...prev, [productId]: newQuantity }));
   };
@@ -395,7 +447,7 @@ export const Orders: React.FC = () => {
         const product = products.find(p => p.id === productId);
         if (product && quantity > 0) {
           const isHeld = heldItems.has(productId);
-          const isOutOfStock = product.stock === 0;
+          const isOutOfStock = getEffectiveStock(product) === 0;
 
           if (isHeld || isOutOfStock) {
             acc.heldItemsCount += quantity;
@@ -431,7 +483,7 @@ export const Orders: React.FC = () => {
       const product = products.find(p => p.id === productId);
       if (!product) return;
       const isHeld = heldItems.has(productId);
-      const isOutOfStock = product.stock === 0;
+      const isOutOfStock = getEffectiveStock(product) === 0;
       const price = orderItemPrices[productId] ?? product?.price ?? 0;
 
       if (isHeld || isOutOfStock) {
@@ -448,72 +500,84 @@ export const Orders: React.FC = () => {
 
   // Patch: Always assign customerId (snake_case for DB)
   if (modalState === 'create') {
-    const maxIdNum = orders.reduce((max, order) => {
-      const num = parseInt(order.id.replace('ORD', ''), 10);
-      return num > max ? num : max;
-    }, 0);
+    try {
+      if (!customer.id) {
+        alert('Please select a customer');
+        return;
+      }
 
-    const newOrder = {
-      id: `ORD${(maxIdNum + 1).toString().padStart(4, '0')}`,
-      customerid: customer.id,
-      customername: customer.name,
-      assigneduserid: currentUser?.id ?? '',
-      orderitems: JSON.stringify(newOrderItems),
-      backordereditems: JSON.stringify(newBackorderedItems),
-      method: orderMethod || '',
-      expecteddeliverydate: expectedDeliveryDate || null,
-      orderdate: expectedDeliveryDate || new Date().toISOString().slice(0, 10),
-      totalamount: total,
-      status: OrderStatus.Pending,
-      notes: orderNotes || '',
-    };
-    const { error } = await supabase.from('orders').insert([newOrder]);
-    if (error) alert('Error adding order: ' + error.message);
-    const freshOrders = await fetchOrders();
-    // if (freshOrders) setOrders(freshOrders);
-    if (freshOrders) {
-      const normalized = freshOrders.map(o => ({
-        ...o,
-        date: o.orderdate || o.date || null,   // unify to `date`
-        customerName: o.customername || o.customerName || '',
-        customerId: o.customerid || o.customerId || '',
-        assignedUserId: o.assigneduserid || o.assignedUserId || '',
-        total: o.totalamount ?? o.total ?? 0,
-        orderItems: typeof o.orderitems === 'string' ? JSON.parse(o.orderitems) : o.orderitems,
-        backorderedItems: typeof o.backordereditems === 'string' ? JSON.parse(o.backordereditems) : o.backordereditems,
-      }));
-      setOrders(normalized);
+      if (newOrderItems.length === 0) {
+        alert('Please add at least one item to the order');
+        return;
+      }
+
+      const maxIdNum = orders.reduce((max, order) => {
+        const num = parseInt(order.id.replace('ORD', ''), 10);
+        return num > max ? num : max;
+      }, 0);
+
+      const newOrder = {
+        id: `ORD${(maxIdNum + 1).toString().padStart(3, '0')}`,
+        customerid: customer.id,
+        customername: customer.name,
+        assigneduserid: currentUser?.id ?? '',
+        orderitems: JSON.stringify(newOrderItems),
+        backordereditems: JSON.stringify(newBackorderedItems),
+        method: orderMethod || '',
+        expecteddeliverydate: expectedDeliveryDate || null,
+        orderdate: expectedDeliveryDate || new Date().toISOString().slice(0, 10),
+        totalamount: total,
+        status: OrderStatus.Pending,
+        notes: orderNotes || '',
+        chequebalance: 0,
+        creditbalance: 0,
+      };
+      
+      const { error } = await supabase.from('orders').insert([newOrder]);
+      if (error) {
+        alert('Error adding order: ' + error.message);
+        return;
+      }
+      
+      const freshOrders = await fetchOrders();
+      if (freshOrders) setOrders(freshOrders);
+      alert('Order created successfully!');
+    } catch (error) {
+      console.error('Unexpected error creating order:', error);
+      alert('An unexpected error occurred. Please try again.');
+      return;
     }
   } else if (modalState === 'edit' && currentOrder) {
-    const updatedOrder = {
-      customerid: customer.id,
-      customername: customer.name,
-      assigneduserid: currentOrder.assigneduserid ?? '',
-      orderitems: JSON.stringify(newOrderItems),
-      backordereditems: JSON.stringify(newBackorderedItems),
-      method: orderMethod || '',
-      expecteddeliverydate: expectedDeliveryDate || null,
-      orderdate: expectedDeliveryDate || currentOrder.orderdate || new Date().toISOString().slice(0, 10),
-      totalamount: total,
-      status: currentOrder.status ?? OrderStatus.Pending,
-      notes: orderNotes || '',
-    };
-    const { error } = await supabase.from('orders').update(updatedOrder).eq('id', currentOrder.id);
-    if (error) alert('Error updating order: ' + error.message);
-    const freshOrders = await fetchOrders();
-    // if (freshOrders) setOrders(freshOrders);
-    if (freshOrders) {
-      const normalized = freshOrders.map(o => ({
-        ...o,
-        date: o.orderdate || o.date || null,   // unify to `date`
-        customerName: o.customername || o.customerName || '',
-        customerId: o.customerid || o.customerId || '',
-        assignedUserId: o.assigneduserid || o.assignedUserId || '',
-        total: o.totalamount ?? o.total ?? 0,
-        orderItems: typeof o.orderitems === 'string' ? JSON.parse(o.orderitems) : o.orderitems,
-        backorderedItems: typeof o.backordereditems === 'string' ? JSON.parse(o.backordereditems) : o.backordereditems,
-      }));
-      setOrders(normalized);
+    try {
+      const updatedOrder = {
+        customerid: customer.id,
+        customername: customer.name,
+        assigneduserid: currentOrder.assigneduserid ?? '',
+        orderitems: JSON.stringify(newOrderItems),
+        backordereditems: JSON.stringify(newBackorderedItems),
+        method: orderMethod || '',
+        expecteddeliverydate: expectedDeliveryDate || null,
+        orderdate: expectedDeliveryDate || currentOrder.orderdate || new Date().toISOString().slice(0, 10),
+        totalamount: total,
+        status: currentOrder.status ?? OrderStatus.Pending,
+        notes: orderNotes || '',
+        chequebalance: currentOrder.chequeBalance || 0,
+        creditbalance: currentOrder.creditBalance || 0,
+      };
+      
+      const { error } = await supabase.from('orders').update(updatedOrder).eq('id', currentOrder.id);
+      if (error) {
+        alert('Error updating order: ' + error.message);
+        return;
+      }
+      
+      const freshOrders = await fetchOrders();
+      if (freshOrders) setOrders(freshOrders);
+      alert('Order updated successfully!');
+    } catch (error) {
+      console.error('Unexpected error updating order:', error);
+      alert('An unexpected error occurred. Please try again.');
+      return;
     }
   }
   closeModal();
@@ -521,10 +585,22 @@ export const Orders: React.FC = () => {
   
   const handleDeleteOrder = async () => {
     if (!orderToDelete) return;
-    await supabase.from('orders').delete().eq('id', orderToDelete.id);
-    const freshOrders = await fetchOrders();
-    if (freshOrders) setOrders(freshOrders);
-    closeDeleteModal();
+    
+    try {
+      const { error } = await supabase.from('orders').delete().eq('id', orderToDelete.id);
+      if (error) {
+        alert('Error deleting order: ' + error.message);
+        return;
+      }
+      
+      const freshOrders = await fetchOrders();
+      if (freshOrders) setOrders(freshOrders);
+      alert('Order deleted successfully!');
+      closeDeleteModal();
+    } catch (error) {
+      console.error('Unexpected error deleting order:', error);
+      alert('An unexpected error occurred while deleting. Please try again.');
+    }
   };
   
   const handleStatusChange = (orderId: string, newStatus: OrderStatus) => {
@@ -555,7 +631,7 @@ export const Orders: React.FC = () => {
 
     } else { // unhold
       const product = products.find(p => p.id === productId);
-      if (!product || product.stock === 0) return;
+      if (!product || getEffectiveStock(product) === 0) return;
 
       const itemIndex = (updatedOrder.backorderedItems || []).findIndex((item: OrderItem) => item.productId === productId);
       if (itemIndex === -1) return;
@@ -589,7 +665,7 @@ export const Orders: React.FC = () => {
         chequeBalance: editableChequeBalance,
         creditBalance: editableCreditBalance,
     };
-    // Save to Supabase
+    // Save to Supabase (Note: amountPaid is calculated field, not stored separately)
     supabase.from('orders').update({
   chequebalance: editableChequeBalance,
   creditbalance: editableCreditBalance
@@ -598,7 +674,23 @@ export const Orders: React.FC = () => {
         // Refetch orders to persist changes after refresh
         const { data: freshOrders, error: fetchError } = await supabase.from('orders').select('*');
         if (!fetchError && freshOrders) {
-          setOrders(freshOrders);
+          // Map the fresh orders data properly
+          const mappedOrders = freshOrders.map((row: any) => ({
+            id: row.id,
+            customerId: row.customerid,
+            customerName: row.customername,
+            date: row.orderdate,
+            total: row.totalamount,
+            status: row.status,
+            paymentMethod: row.paymentmethod,
+            notes: row.notes,
+            assignedUserId: row.assigneduserid,
+            orderItems: typeof row.orderitems === 'string' ? JSON.parse(row.orderitems) : (row.orderitems || []),
+            backorderedItems: [],
+            chequeBalance: row.chequebalance == null || isNaN(Number(row.chequebalance)) ? 0 : Number(row.chequebalance),
+            creditBalance: row.creditbalance == null || isNaN(Number(row.creditbalance)) ? 0 : Number(row.creditbalance),
+          }));
+          setOrders(mappedOrders);
           setViewingOrder(updatedOrder);
           alert('Balances updated and saved!');
         } else {
@@ -622,7 +714,7 @@ export const Orders: React.FC = () => {
     let stockSufficient = true;
     for (const item of orderToFinalize.orderItems) {
         const product = products.find(p => p.id === item.productId);
-        if (!product || product.stock < item.quantity) {
+        if (!product || getEffectiveStock(product) < item.quantity) {
             alert(`Insufficient stock for ${product?.name || 'an item'}. Cannot finalize order.`);
             stockSufficient = false;
             break;
@@ -636,9 +728,9 @@ export const Orders: React.FC = () => {
     const soldQty = orderToFinalize.orderItems.reduce((sum, i) => sum + i.quantity, 0);
     await supabase.from('orders').update({ status: OrderStatus.Delivered, sold: soldQty }).eq('id', orderToFinalize.id);
     // --- Sync allocation salesTotal and update allocatedItems after delivery ---
-    if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
+    if (currentUser?.role === UserRole.Driver && driverAllocations.length > 0) {
       const todayStr = new Date().toISOString().slice(0, 10);
-      const allocation = (window as any).driverAllocations.find((a: any) => a.driverId === currentUser.id && a.date === todayStr);
+      const allocation = driverAllocations.find((a: any) => a.driverId === currentUser.id && a.date === todayStr);
       if (allocation) {
         // Update salesTotal
         const newSalesTotal = (allocation.salesTotal || 0) + soldQty;
@@ -657,49 +749,16 @@ export const Orders: React.FC = () => {
   // TODO: Refetch driver allocations here using context or effect so driver sees only undelivered products
       }
     }
-
-    if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const allocation = (window as any).driverAllocations.find(
-    (a: any) => a.driverId === currentUser.id && a.date === todayStr
-  );
-
-  if (allocation) {
-    const deliveredItems = orderToFinalize.orderItems;
-
-    // recalc sales total
-    const newSalesTotal =
-      (allocation.salesTotal || 0) + deliveredItems.reduce((sum, i) => sum + i.quantity, 0);
-
-    // subtract delivered items from driver’s allocation
-    const updatedAllocatedItems = allocation.allocatedItems
-      .map((item: any) => {
-        const delivered = deliveredItems.find((d: any) => d.productId === item.productId);
-        if (delivered) {
-          const newQty = item.quantity - delivered.quantity;
-          return { ...item, quantity: newQty > 0 ? newQty : 0 };
-        }
-        return item;
-      })
-      .filter((item: any) => item.quantity > 0);
-
-    // update allocation in DB
-    await supabase
-      .from('driver_allocations')
-      .update({
-        sales_total: newSalesTotal,
-        allocated_items: JSON.stringify(updatedAllocatedItems),
-      })
-      .eq('id', allocation.id);
-
-    // update local cache so UI refreshes
-    (window as any).driverAllocations = (window as any).driverAllocations.map((a: any) =>
-      a.id === allocation.id
-        ? { ...a, allocatedItems: updatedAllocatedItems, salesTotal: newSalesTotal }
-        : a
-    );
-  }
-}
+  // --- Deduct inventory in UI and Supabase ---
+    // Patch: Update product stock in Supabase and then fetch fresh products
+    for (const item of orderToFinalize.orderItems) {
+      await supabase.from('products').update({ stock: (products.find(p => p.id === item.productId)?.stock ?? 0) - item.quantity }).eq('id', item.productId);
+    }
+    // Fetch fresh products from Supabase and update UI
+    const { data: freshProducts, error: prodError } = await supabase.from('products').select('*');
+    if (!prodError && freshProducts) {
+      setProducts(freshProducts);
+    }
 
     // 2. Update order status
     const updatedOrder: Order = { ...orderToFinalize, status: OrderStatus.Delivered };
@@ -804,14 +863,31 @@ ${COMPANY_DETAILS.email}
       <div className="p-4 sm:p-6 lg:p-8 space-y-8 no-print">
         <div className="flex justify-between items-center">
           <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">Orders</h1>
-          {canEdit && (
+          <div className="flex gap-2">
+            {/* Export Buttons */}
             <button
-              onClick={openCreateModal}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              onClick={() => exportOrders(filteredOrders, 'csv')}
+              className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+              title="Export as CSV"
             >
-              New Order
+              📊 CSV
             </button>
-          )}
+            <button
+              onClick={() => exportOrders(filteredOrders, 'xlsx')}
+              className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+              title="Export as Excel"
+            >
+              📋 Excel
+            </button>
+            {canEdit && (
+              <button
+                onClick={openCreateModal}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                New Order
+              </button>
+            )}
+          </div>
         </div>
 
         <Card>
@@ -870,12 +946,11 @@ ${COMPANY_DETAILS.email}
                 // Use DB columns: assigneduserid, totalamount, orderdate
                               const assignedUser = users.find(u => u.id === order.assignedUserId);
                 let allocatedProductIds: string[] = [];
-                if (currentUser?.role === UserRole.Driver && (window as any).driverAllocations) {
+                if (currentUser?.role === UserRole.Driver && driverAllocations.length > 0) {
                   const todayStr = new Date().toISOString().slice(0, 10);
-                  const allocations = (window as any).driverAllocations;
-                  console.log('DriverAllocations:', allocations);
+                  console.log('DriverAllocations:', driverAllocations);
                   console.log('CurrentUser:', currentUser);
-                  const allocation = allocations.find((a: any) => {
+                  const allocation = driverAllocations.find((a: any) => {
                     console.log('Checking allocation:', a);
                     return a.driverId === currentUser.id && a.date === todayStr;
                   });
@@ -964,176 +1039,167 @@ ${COMPANY_DETAILS.email}
           </CardContent>
         </Card>
 
-        <Modal
-          isOpen={modalState === 'create' || modalState === 'edit'}
-          onClose={closeModal}
-          title={modalState === 'create' ? 'Create New Order' : `Edit Order ${currentOrder?.id}`}
-        >
-          <div className="flex flex-col max-h-[90vh]">
-            {/* Body: scrollable */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {/* Customer + Date */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="customer" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Customer</label>
-                  <select
-                    id="customer"
-                    value={selectedCustomer}
-                    onChange={(e) => setSelectedCustomer(e.target.value)}
-                    className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
-                  >
-                    {customers.map(customer => (
-                      <option key={customer.id} value={customer.id}>{customer.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
+        <Modal isOpen={modalState === 'create' || modalState === 'edit'} onClose={closeModal} title={modalState === 'create' ? 'Create New Order' : `Edit Order ${currentOrder?.id}`}>
+          <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label htmlFor="customer" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Customer</label>
+                <select
+                  id="customer"
+                  value={selectedCustomer}
+                  onChange={(e) => setSelectedCustomer(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
+                >
+                  {customers.map(customer => (
+                    <option key={customer.id} value={customer.id}>{customer.name}</option>
+                  ))}
+                </select>
+              </div>
+               <div>
                   <label htmlFor="deliveryDate" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Expected Delivery Date</label>
                   <input
-                    type="date"
-                    id="deliveryDate"
-                    value={expectedDeliveryDate}
-                    onChange={(e) => setExpectedDeliveryDate(e.target.value)}
-                    className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
+                      type="date"
+                      id="deliveryDate"
+                      value={expectedDeliveryDate}
+                      onChange={(e) => setExpectedDeliveryDate(e.target.value)}
+                      className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
                   />
-                </div>
-              </div>
-
-              {/* Products */}
-              <div>
-                <label className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Products</label>
-                <div className="space-y-3">
-                  {availableProductsForOrder.map(product => {
-                    const isOutOfStock = product.stock === 0;
-                    const isHeld = heldItems.has(product.id);
-                    const isUnavailable = isHeld || isOutOfStock;
-                    
-                    return (
-                      <div key={product.id} className={`grid grid-cols-12 gap-2 items-center p-2 rounded-lg transition-colors ${isHeld ? 'bg-yellow-50 dark:bg-yellow-900/40' : 'bg-slate-50 dark:bg-slate-700'} ${isOutOfStock && !isHeld ? 'opacity-70' : ''}`}>
-                        <div className="flex items-center space-x-3 col-span-12 sm:col-span-4">
-                          <img src={product.imageUrl} alt={product.name} className="w-10 h-10 rounded-md" />
-                          <div>
-                            <p className="font-medium text-slate-900 dark:text-white">{product.name}</p>
-                              <p className="text-xs text-slate-500 dark:text-slate-400">
-                              {isOutOfStock ? <span className="text-red-500 font-semibold ml-1">Out of Stock</span> : ` Stock: ${product.stock}`}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="col-span-4 sm:col-span-2">
-                          <label htmlFor={`price-${product.id}`} className="sr-only">Unit Price for {product.name}</label>
-                          <div className="relative">
-                              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">{currency}</span>
-                              <input
-                                  type="number"
-                                  id={`price-${product.id}`}
-                                  min="0"
-                                  step="0.01"
-                                  value={orderItemPrices[product.id] ?? ''}
-                                  placeholder={product.price.toFixed(2)}
-                                  onChange={(e) => handlePriceChange(product.id, parseFloat(e.target.value) || 0)}
-                                  className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center pl-10"
-                                  disabled={isUnavailable}
-                              />
-                          </div>
-                        </div>
-                        <div className="col-span-4 sm:col-span-2">
-                          <label htmlFor={`discount-${product.id}`} className="sr-only">Discount for {product.name}</label>
-                            <div className="relative">
-                              <input
-                                  type="number"
-                                  id={`discount-${product.id}`}
-                                  min="0"
-                                  max="100"
-                                  value={orderDiscounts[product.id] || ''}
-                                  placeholder="0"
-                                  onChange={(e) => handleDiscountChange(product.id, parseInt(e.target.value, 10) || 0)}
-                                  className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:cursor-not-allowed"
-                                  disabled={isUnavailable}
-                              />
-                              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">%</span>
-                            </div>
-                        </div>
-                          <div className="col-span-4 sm:col-span-2">
-                          <label htmlFor={`quantity-${product.id}`} className="sr-only">Quantity for {product.name}</label>
-                          <input
-                              type="number"
-                              id={`quantity-${product.id}`}
-                              min="0"
-                              max={isUnavailable ? undefined : product.stock}
-                              value={orderItems[product.id] || ''}
-                              placeholder="0"
-                              onChange={(e) => handleQuantityChange(product.id, parseInt(e.target.value, 10) || 0)}
-                              className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center"
-                          />
-                        </div>
-                          <div className="col-span-12 sm:col-span-2">
-                            <button
-                              onClick={() => toggleHoldItem(product.id)}
-                              className={`w-full py-1.5 text-xs font-medium rounded-md transition-colors ${isHeld ? 'bg-yellow-400 text-yellow-900 hover:bg-yellow-500' : 'bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500'}`}
-                              >
-                              {isHeld ? 'Unhold' : 'Hold'}
-                            </button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-
-              {/* Notes + Payment */}
-              <div>
-                <label htmlFor="orderNotes" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Order Notes</label>
-                <input
-                  type="text"
-                  id="orderNotes"
-                  value={orderNotes}
-                  onChange={e => setOrderNotes(e.target.value)}
-                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="orderMethod" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Payment Method</label>
-                <input
-                  type="text"
-                  id="orderMethod"
-                  value={orderMethod}
-                  onChange={e => setOrderMethod(e.target.value)}
-                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
-                />
               </div>
             </div>
-
-            {/* Footer: fixed */}
-            <div className="p-6 border-t">
-              <div className="text-sm space-y-1 mb-4">
-                <p className="text-slate-600 dark:text-slate-300">
-                  Items (In Stock): <span className="font-bold text-slate-900 dark:text-white">{inStockItems}</span>
-                </p>
-                {heldItemsCount > 0 && (
-                  <p className="text-yellow-600 dark:text-yellow-400">
-                    Items (Held/OOS): <span className="font-bold">{heldItemsCount}</span>
-                  </p>
+            
+            <div>
+              <label className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Products</label>
+              
+              {/* Product Search Input */}
+              <div className="mb-3 relative">
+                <input
+                  type="text"
+                  placeholder="Search products by name, category, or SKU..."
+                  value={productSearchTerm}
+                  onChange={(e) => setProductSearchTerm(e.target.value)}
+                  className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pr-10 dark:bg-slate-700 dark:border-slate-600 dark:placeholder-slate-400 dark:text-white"
+                />
+                {productSearchTerm && (
+                  <button
+                    onClick={() => setProductSearchTerm('')}
+                    className="absolute right-2 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                    title="Clear search"
+                  >
+                    ✕
+                  </button>
                 )}
-                <p className="text-slate-600 dark:text-slate-300 text-base">
-                  Total Price: <span className="font-bold text-slate-900 dark:text-white">{formatCurrency(total, currency)}</span>
-                </p>
               </div>
+              
+              <div className="space-y-3 max-h-60 overflow-y-auto">
+                {availableProductsForOrder.length === 0 ? (
+                  <div className="text-center py-4 text-slate-500 dark:text-slate-400">
+                    {productSearchTerm.trim() ? 'No products found matching your search.' : 'No products available.'}
+                  </div>
+                ) : (
+                  availableProductsForOrder.map(product => {
+                  const isOutOfStock = getEffectiveStock(product) === 0;
+                  const isHeld = heldItems.has(product.id);
+                  const isUnavailable = isHeld || isOutOfStock;
+                  
+                  return (
+                    <div key={product.id} className={`grid grid-cols-12 gap-2 items-center p-2 rounded-lg transition-colors ${isHeld ? 'bg-yellow-50 dark:bg-yellow-900/40' : 'bg-slate-50 dark:bg-slate-700'} ${isOutOfStock && !isHeld ? 'opacity-70' : ''}`}>
+                      <div className="flex items-center space-x-3 col-span-12 sm:col-span-4">
+                        <img src={product.imageUrl} alt={product.name} className="w-10 h-10 rounded-md" />
+                        <div>
+                          <p className="font-medium text-slate-900 dark:text-white">{product.name}</p>
+                           <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {isOutOfStock ? <span className="text-red-500 font-semibold ml-1">Out of Stock</span> : (
+                              currentUser?.role === UserRole.Driver 
+                                ? ` Allocated: ${getEffectiveStock(product)}`
+                                : ` Stock: ${getEffectiveStock(product)}`
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="col-span-4 sm:col-span-2">
+                        <label htmlFor={`price-${product.id}`} className="sr-only">Unit Price for {product.name}</label>
+                        <div className="relative">
+                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">{currency}</span>
+                            <input
+                                type="number"
+                                id={`price-${product.id}`}
+                                min="0"
+                                step="0.01"
+                                value={orderItemPrices[product.id] ?? ''}
+                                placeholder={product.price.toFixed(2)}
+                                onChange={(e) => handlePriceChange(product.id, parseFloat(e.target.value) || 0)}
+                                className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center pl-10"
+                                disabled={isUnavailable}
+                            />
+                        </div>
+                      </div>
+                      <div className="col-span-4 sm:col-span-2">
+                        <label htmlFor={`discount-${product.id}`} className="sr-only">Discount for {product.name}</label>
+                         <div className="relative">
+                            <input
+                                type="number"
+                                id={`discount-${product.id}`}
+                                min="0"
+                                max="100"
+                                value={orderDiscounts[product.id] || ''}
+                                placeholder="0"
+                                onChange={(e) => handleDiscountChange(product.id, parseInt(e.target.value, 10) || 0)}
+                                className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:cursor-not-allowed"
+                                disabled={isUnavailable}
+                            />
+                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">%</span>
+                         </div>
+                      </div>
+                       <div className="col-span-4 sm:col-span-2">
+                        <label htmlFor={`quantity-${product.id}`} className="sr-only">Quantity for {product.name}</label>
+                        <input
+                            type="number"
+                            id={`quantity-${product.id}`}
+                            min="0"
+                            max={isUnavailable ? undefined : getEffectiveStock(product)}
+                            value={orderItems[product.id] || ''}
+                            placeholder="0"
+                            onChange={(e) => handleQuantityChange(product.id, parseInt(e.target.value, 10) || 0)}
+                            className="w-full p-1.5 border border-slate-300 rounded-md dark:bg-slate-600 dark:border-slate-500 dark:text-white text-center"
+                        />
+                      </div>
+                       <div className="col-span-12 sm:col-span-2">
+                          <button
+                            onClick={() => toggleHoldItem(product.id)}
+                            className={`w-full py-1.5 text-xs font-medium rounded-md transition-colors ${isHeld ? 'bg-yellow-400 text-yellow-900 hover:bg-yellow-500' : 'bg-slate-200 dark:bg-slate-600 hover:bg-slate-300 dark:hover:bg-slate-500'}`}
+                            >
+                            {isHeld ? 'Unhold' : 'Hold'}
+                          </button>
+                      </div>
+                    </div>
+                  )
+                }))}
+              </div>
+            </div>
+          </div>
 
+          <div className="flex items-center justify-between p-6 border-t border-slate-200 dark:border-slate-600">
+            <div className="w-full">
+              <div className="text-sm space-y-1 mb-4">
+                <p className="text-slate-600 dark:text-slate-300">Items (In Stock): <span className="font-bold text-slate-900 dark:text-white">{inStockItems}</span></p>
+                {heldItemsCount > 0 && (
+                    <p className="text-yellow-600 dark:text-yellow-400">Items (Held/OOS): <span className="font-bold">{heldItemsCount}</span></p>
+                )}
+                <p className="text-slate-600 dark:text-slate-300 text-base">Total Price: <span className="font-bold text-slate-900 dark:text-white">{formatCurrency(total, currency)}</span></p>
+              </div>
+              <div className="mb-4">
+                <label htmlFor="orderNotes" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Order Notes</label>
+                <input type="text" id="orderNotes" value={orderNotes} onChange={e => setOrderNotes(e.target.value)} className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white" />
+              </div>
+              <div className="mb-4">
+                <label htmlFor="orderMethod" className="block mb-2 text-sm font-medium text-slate-900 dark:text-white">Payment Method</label>
+                <input type="text" id="orderMethod" value={orderMethod} onChange={e => setOrderMethod(e.target.value)} className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-slate-700 dark:border-slate-600 dark:text-white" />
+              </div>
               <div className="flex space-x-2">
-                <button
-                  onClick={closeModal}
-                  type="button"
-                  className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600"
-                >
+                <button onClick={closeModal} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
                   Cancel
                 </button>
-                <button
-                  onClick={handleSaveOrder}
-                  type="button"
-                  className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 disabled:cursor-not-allowed"
-                  disabled={(inStockItems + heldItemsCount) === 0 || !selectedCustomer}
-                >
+                <button onClick={handleSaveOrder} type="button" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 disabled:bg-blue-400 dark:disabled:bg-blue-800 disabled:cursor-not-allowed" disabled={(inStockItems + heldItemsCount) === 0 || !selectedCustomer}>
                   {modalState === 'create' ? 'Create Order' : 'Save Changes'}
                 </button>
               </div>
@@ -1197,32 +1263,63 @@ ${COMPANY_DETAILS.email}
                                               step="0.01"
                                               min="0"
                                               value={editableChequeBalance}
-                                              onChange={(e) => setEditableChequeBalance(parseFloat(e.target.value) || 0)}
+                                              onChange={(e) => {
+                                                  const cheque = parseFloat(e.target.value) || 0;
+                                                  setEditableChequeBalance(cheque);
+                                                  // Auto-calculate credit balance
+                                                  const newCredit = viewingOrder.total - editableAmountPaid - cheque;
+                                                  setEditableCreditBalance(newCredit > 0 ? newCredit : 0);
+                                              }}
                                               className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pl-10 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
                                               disabled={!canEdit}
                                           />
                                       </div>
                                   </div>
                                   <div>
-                                      <label htmlFor="creditBalance" className="block mb-1 text-sm font-medium text-slate-700 dark:text-slate-300">Credit Balance</label>
-                                          <div className="relative">
+                                      <label htmlFor="amountPaid" className="block mb-1 text-sm font-medium text-slate-700 dark:text-slate-300">Amount Paid</label>
+                                      <div className="relative">
                                           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{currency}</span>
                                           <input 
                                               type="number"
-                                              id="creditBalance"
+                                              id="amountPaid"
+                                              step="0.01"
+                                              min="0"
+                                              value={editableAmountPaid}
+                                              onChange={(e) => {
+                                                  const paid = parseFloat(e.target.value) || 0;
+                                                  setEditableAmountPaid(paid);
+                                                  // Auto-calculate credit balance
+                                                  const newCredit = viewingOrder.total - paid - editableChequeBalance;
+                                                  setEditableCreditBalance(newCredit > 0 ? newCredit : 0);
+                                              }}
+                                              className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pl-10 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
+                                              disabled={!canEdit}
+                                          />
+                                      </div>
+                                  </div>
+                                  <div className="sm:col-span-2">
+                                      <label className="block mb-1 text-sm font-medium text-slate-700 dark:text-slate-300">Credit Balance (Auto-calculated)</label>
+                                      <div className="relative">
+                                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">{currency}</span>
+                                          <input 
+                                              type="number"
                                               step="0.01"
                                               min="0"
                                               value={editableCreditBalance}
-                                              onChange={(e) => setEditableCreditBalance(parseFloat(e.target.value) || 0)}
-                                              className="bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 pl-10 dark:bg-slate-700 dark:border-slate-600 dark:text-white"
-                                              disabled={!canEdit}
+                                              className="bg-gray-100 border border-slate-300 text-slate-900 text-sm rounded-lg block w-full p-2.5 pl-10 dark:bg-slate-800 dark:border-slate-600 dark:text-white cursor-not-allowed"
+                                              disabled
+                                              readOnly
                                           />
                                       </div>
                                   </div>
                                   <div className="sm:col-span-2 mt-2 p-3 bg-slate-50 dark:bg-slate-900/50 rounded-lg">
                                       <div className="flex justify-between">
                                           <span className="text-slate-600 dark:text-slate-400">Amount Paid:</span> 
-                                          <span className="font-medium text-green-600">{formatCurrency(viewingOrder.total - editableChequeBalance - editableCreditBalance, currency)}</span>
+                                          <span className="font-medium text-green-600">{formatCurrency(editableAmountPaid, currency)}</span>
+                                      </div>
+                                      <div className="flex justify-between">
+                                          <span className="text-slate-600 dark:text-slate-400">Pending Cheque:</span> 
+                                          <span className="font-medium text-orange-600">{formatCurrency(editableChequeBalance, currency)}</span>
                                       </div>
                                       <div className="flex justify-between font-bold text-base mt-1">
                                           <span className="text-slate-800 dark:text-slate-200">Balance Due:</span> 
@@ -1310,8 +1407,8 @@ ${COMPANY_DETAILS.email}
                                                               <button
                                                                   onClick={() => handleToggleHoldInView(item.productId, 'unhold')}
                                                                   className="px-3 py-1 text-xs font-medium rounded-md transition-colors bg-green-500 text-white hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 dark:focus:ring-offset-slate-800 disabled:bg-slate-300 dark:disabled:bg-slate-600 disabled:cursor-not-allowed"
-                                                                  disabled={!product || product.stock === 0}
-                                                                  title={!product || product.stock === 0 ? 'Item is out of stock' : 'Move to current order'}
+                                                                  disabled={!product || getEffectiveStock(product) === 0}
+                                                                  title={!product || getEffectiveStock(product) === 0 ? 'Item is out of stock' : 'Move to current order'}
                                                               >
                                                                   Unhold
                                                               </button>

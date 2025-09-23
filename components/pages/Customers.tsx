@@ -6,6 +6,7 @@ import { Modal } from '../ui/Modal';
 import { Badge } from '../ui/Badge';
 import { useData } from '../../contexts/DataContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { exportCustomers } from '../../utils/exportUtils';
 
 const formatCurrency = (amount: number, currency: string) => {
     return new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 0 }).format(amount).replace('$', `${currency} `);
@@ -58,48 +59,76 @@ export const Customers: React.FC = () => {
     setCustomerToDelete(null);
   };
 
-  const handleSave = async () => {
-    if (modalMode === 'add') {
-      // Generate unique id (CUST + 3 digit random number not in use)
-      let newId;
-      const existingIds = customers.map(c => c.id);
-      do {
-        newId = `CUST${Math.floor(100 + Math.random() * 900)}`;
-      } while (existingIds.includes(newId));
+    const handleSave = () => {
+    (async () => {
+      try {
+        if (!currentCustomer.name || !currentCustomer.email) {
+          alert('Please fill in all required fields (name and email)');
+          return;
+        }
 
-      const newCustomer = {
-        id: newId,
-        name: currentCustomer.name || '',
-        email: currentCustomer.email || '',
-        phone: currentCustomer.phone || '',
-        location: currentCustomer.location || '',
-        joindate: new Date().toISOString().split('T')[0],
-        totalspent: 0,
-        outstandingbalance: 0,
-        avatarurl: currentCustomer.avatarUrl || `https://i.pravatar.cc/40?u=${currentCustomer.email || 'new'}`,
-      };
-      await supabase.from('customers').insert([newCustomer]);
-    } else {
-      await supabase.from('customers').update({
-        name: currentCustomer.name,
-        email: currentCustomer.email,
-        phone: currentCustomer.phone,
-        location: currentCustomer.location,
-        outstandingbalance: currentCustomer.outstandingBalance,
-        avatarurl: currentCustomer.avatarUrl,
-      }).eq('id', currentCustomer.id);
-    }
-  // Only update context if you want to show new customer immediately
-  // Otherwise, rely on DataContext to refetch on next mount
-    closeModal();
+        if (modalMode === 'add') {
+          const newCustomer = {
+            id: `CUST${(customers.length + 10).toString().padStart(3, '0')}`,
+            name: currentCustomer.name || '',
+            email: currentCustomer.email || '',
+            phone: currentCustomer.phone || '',
+            location: currentCustomer.location || '',
+            joindate: new Date().toISOString().split('T')[0],
+            totalspent: 0,
+            outstandingbalance: 0,
+            avatarurl: currentCustomer.avatarUrl || `https://i.pravatar.cc/40?u=${currentCustomer.email || 'new'}`,
+          };
+          
+          const { error } = await supabase.from('customers').insert([newCustomer]);
+          if (error) {
+            alert(`Error adding customer: ${error.message}`);
+            return;
+          }
+          alert('Customer added successfully!');
+        } else {
+          const { error } = await supabase.from('customers').update({
+            name: currentCustomer.name,
+            email: currentCustomer.email,
+            phone: currentCustomer.phone,
+            location: currentCustomer.location,
+            outstandingbalance: currentCustomer.outstandingBalance,
+            avatarurl: currentCustomer.avatarUrl,
+          }).eq('id', currentCustomer.id);
+          
+          if (error) {
+            alert(`Error updating customer: ${error.message}`);
+            return;
+          }
+          alert('Customer updated successfully!');
+        }
+        // Only update context if you want to show new customer immediately
+        // Otherwise, rely on DataContext to refetch on next mount
+        closeModal();
+      } catch (error) {
+        console.error('Unexpected error in customer operation:', error);
+        alert('An unexpected error occurred. Please try again.');
+      }
+    })();
   };
   
   const handleDelete = async () => {
     if (customerToDelete) {
-      await supabase.from('customers').delete().eq('id', customerToDelete.id);
-  // Only update context if you want to show new customer immediately
-  // Otherwise, rely on DataContext to refetch on next mount
-      closeDeleteConfirm();
+      try {
+        const { error } = await supabase.from('customers').delete().eq('id', customerToDelete.id);
+        if (error) {
+          alert(`Error deleting customer: ${error.message}`);
+          return;
+        }
+        
+        alert('Customer deleted successfully!');
+        // Only update context if you want to show new customer immediately
+        // Otherwise, rely on DataContext to refetch on next mount
+        closeDeleteConfirm();
+      } catch (error) {
+        console.error('Unexpected error deleting customer:', error);
+        alert('An unexpected error occurred while deleting. Please try again.');
+      }
     }
   };
   
@@ -187,14 +216,31 @@ export const Customers: React.FC = () => {
     <div className="p-4 sm:p-6 lg:p-8 space-y-8">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">Customers</h1>
-        {canEdit && (
-            <button 
-                onClick={() => openModal('add')}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-            Add Customer
-            </button>
-        )}
+        <div className="flex gap-2">
+          {/* Export Buttons */}
+          <button
+            onClick={() => exportCustomers(filteredCustomers, 'csv')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as CSV"
+          >
+            📊 CSV
+          </button>
+          <button
+            onClick={() => exportCustomers(filteredCustomers, 'xlsx')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as Excel"
+          >
+            📋 Excel
+          </button>
+          {canEdit && (
+              <button 
+                  onClick={() => openModal('add')}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+              Add Customer
+              </button>
+          )}
+        </div>
       </div>
 
        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

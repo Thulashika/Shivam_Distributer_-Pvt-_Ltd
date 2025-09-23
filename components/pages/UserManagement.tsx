@@ -6,6 +6,7 @@ import { Modal } from '../ui/Modal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useData } from '../../contexts/DataContext';
 import { supabase } from '../../supabaseClient';
+import { exportUsers } from '../../utils/exportUtils';
 
 const getStatusBadgeVariant = (status: UserStatus): 'success' | 'danger' => {
     return status === UserStatus.Active ? 'success' : 'danger';
@@ -219,9 +220,26 @@ export const UserManagement: React.FC = () => {
         <div className="p-4 sm:p-6 lg:p-8 space-y-8">
             <div className="flex justify-between items-center">
                 <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">User Management</h1>
-                <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-                    Add User
-                </button>
+                <div className="flex gap-2">
+                    {/* Export Buttons */}
+                    <button
+                        onClick={() => exportUsers(filteredUsers, 'csv')}
+                        className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                        title="Export as CSV"
+                    >
+                        📊 CSV
+                    </button>
+                    <button
+                        onClick={() => exportUsers(filteredUsers, 'xlsx')}
+                        className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+                        title="Export as Excel"
+                    >
+                        📋 Excel
+                    </button>
+                    <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+                        Add User
+                    </button>
+                </div>
             </div>
 
             <Card>

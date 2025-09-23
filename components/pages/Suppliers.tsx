@@ -5,6 +5,7 @@ import { Modal } from '../ui/Modal';
 import { useData } from '../../contexts/DataContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
+import { exportSuppliers } from '../../utils/exportUtils';
 
 export const Suppliers: React.FC = () => {
   // Helper functions for Supabase CRUD
@@ -180,11 +181,28 @@ export const Suppliers: React.FC = () => {
     <div className="p-4 sm:p-6 lg:p-8 space-y-8">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">Suppliers</h1>
-        {canEdit && (
-          <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-            Add Supplier
+        <div className="flex gap-2">
+          {/* Export Buttons */}
+          <button
+            onClick={() => exportSuppliers(filteredSuppliers, 'csv')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as CSV"
+          >
+            📊 CSV
           </button>
-        )}
+          <button
+            onClick={() => exportSuppliers(filteredSuppliers, 'xlsx')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as Excel"
+          >
+            📋 Excel
+          </button>
+          {canEdit && (
+            <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+              Add Supplier
+            </button>
+          )}
+        </div>
       </div>
 
       <Card>

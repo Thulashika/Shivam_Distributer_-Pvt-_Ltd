@@ -6,6 +6,9 @@ import { Modal } from '../ui/Modal';
 import { useAuth } from '../../contexts/AuthContext';
 import { useData } from '../../contexts/DataContext';
 import { supabase, fetchProducts } from '../../supabaseClient';
+import { exportProducts } from '../../utils/exportUtils';
+import { useLoading, LoadingButton, LoadingSpinner } from '../../hooks/useLoading';
+import { useValidation, validationRules } from '../../hooks/useValidation';
 
 const getStockBadgeVariant = (stock: number): 'success' | 'warning' | 'danger' | 'info' => {
     if (stock > 100) return 'success';
@@ -33,6 +36,8 @@ export const Products: React.FC = () => {
   const [modalMode, setModalMode] = useState<'add' | 'edit'>('add');
   const [currentProduct, setCurrentProduct] = useState<Partial<Product>>({});
   const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const { setLoading, isLoading } = useLoading();
+  const { errors, validateForm, clearErrors, getFieldError } = useValidation();
 
   const { currentUser } = useAuth();
   const currency = currentUser?.settings.currency || 'LKR';
@@ -84,6 +89,7 @@ export const Products: React.FC = () => {
   const openModal = (mode: 'add' | 'edit', product?: Product) => {
     setModalMode(mode);
     setCurrentProduct(product || { name: '', category: '', price: 0, stock: 0, sku: '', supplier: '', imageUrl: '' });
+    clearErrors();
     setIsModalOpen(true);
   };
 
@@ -100,44 +106,111 @@ export const Products: React.FC = () => {
     setProductToDelete(null);
   };
 
-  const handleSave = async () => {
-    if (modalMode === 'add') {
-      const newProduct = {
-        id: `PROD${(products.length + 10).toString().padStart(3, '0')}`,
-        name: currentProduct.name || 'New Product',
-        category: currentProduct.category || '',
-        price: currentProduct.price || 0,
-        stock: currentProduct.stock || 0,
-        sku: currentProduct.sku || '',
-        supplier: currentProduct.supplier || '',
-        imageurl: currentProduct.imageUrl || `https://picsum.photos/seed/${currentProduct.name || 'new'}/400/400`,
+    const handleSave = () => {
+    (async () => {
+    try {
+      // Validate form
+      const productValidationRules = {
+        name: validationRules.name,
+        category: validationRules.required,
+        price: validationRules.price,
+        stock: validationRules.stock,
+        sku: validationRules.sku,
+        supplier: validationRules.required
       };
-      await supabase.from('products').insert([newProduct]);
-      const freshProducts = await fetchProducts();
-      if (freshProducts) setProducts(freshProducts);
-    } else {
-      // Edit mode: update product in DB
-      await supabase.from('products').update({
-        name: currentProduct.name,
-        category: currentProduct.category,
-        price: currentProduct.price,
-        stock: currentProduct.stock,
-        sku: currentProduct.sku,
-        supplier: currentProduct.supplier,
-        imageurl: currentProduct.imageUrl,
-      }).eq('id', currentProduct.id);
-      const freshProducts = await fetchProducts();
-      if (freshProducts) setProducts(freshProducts);
+
+      const isValid = validateForm(currentProduct, productValidationRules);
+      if (!isValid) {
+        alert('Please fix the validation errors before saving.');
+        return;
+      }
+
+      setLoading('save', true);
+      
+      if (modalMode === 'add') {
+        const newProduct: Product = {
+          id: `PROD${(products.length + 100).toString().padStart(3, '0')}`,
+          name: currentProduct.name || '',
+          category: currentProduct.category || '',
+          price: currentProduct.price || 0,
+          stock: currentProduct.stock || 0,
+          sku: currentProduct.sku || '',
+          supplier: currentProduct.supplier || '',
+          imageUrl: currentProduct.imageUrl || `https://picsum.photos/seed/${currentProduct.name || 'new'}/400/400`,
+        };
+
+        const dbProduct = {
+          id: newProduct.id,
+          name: newProduct.name,
+          category: newProduct.category,
+          price: newProduct.price,
+          stock: newProduct.stock,
+          sku: newProduct.sku,
+          supplier: newProduct.supplier,
+          imageurl: currentProduct.imageUrl || `https://picsum.photos/seed/${currentProduct.name || 'new'}/400/400`,
+        };
+        
+        const { error } = await supabase.from('products').insert([dbProduct]);
+        if (error) {
+          alert(`Error adding product: ${error.message}`);
+          return;
+        }
+        
+        const freshProducts = await fetchProducts();
+        if (freshProducts) setProducts(freshProducts);
+        alert('Product added successfully!');
+      } else {
+        // Edit mode: update product in DB
+        const { error } = await supabase.from('products').update({
+          name: currentProduct.name,
+          category: currentProduct.category,
+          price: currentProduct.price,
+          stock: currentProduct.stock,
+          sku: currentProduct.sku,
+          supplier: currentProduct.supplier,
+          imageurl: currentProduct.imageUrl,
+        }).eq('id', currentProduct.id);
+        
+        if (error) {
+          alert(`Error updating product: ${error.message}`);
+          return;
+        }
+        
+        const freshProducts = await fetchProducts();
+        if (freshProducts) setProducts(freshProducts);
+        alert('Product updated successfully!');
+      }
+      closeModal();
+    } catch (error) {
+      console.error('Unexpected error:', error);
+      alert('An unexpected error occurred. Please try again.');
+    } finally {
+      setLoading('save', false);
     }
-    closeModal();
+    })();
   };
 
   const handleDelete = async () => {
     if (productToDelete) {
-      await supabase.from('products').delete().eq('id', productToDelete.id);
-      const freshProducts = await fetchProducts();
-      if (freshProducts) setProducts(freshProducts);
-      closeDeleteConfirm();
+      try {
+        setLoading('delete', true);
+        
+        const { error } = await supabase.from('products').delete().eq('id', productToDelete.id);
+        if (error) {
+          alert(`Error deleting product: ${error.message}`);
+          return;
+        }
+        
+        const freshProducts = await fetchProducts();
+        if (freshProducts) setProducts(freshProducts);
+        alert('Product deleted successfully!');
+        closeDeleteConfirm();
+      } catch (error) {
+        console.error('Unexpected error deleting product:', error);
+        alert('An unexpected error occurred while deleting. Please try again.');
+      } finally {
+        setLoading('delete', false);
+      }
     }
   };
   
@@ -180,11 +253,28 @@ export const Products: React.FC = () => {
         <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100">
             {isDriver ? 'My Allocated Stock' : 'Products'}
         </h1>
-        {canEdit && (
-            <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-            Add Product
-            </button>
-        )}
+        <div className="flex gap-2">
+          {/* Export Buttons */}
+          <button
+            onClick={() => exportProducts(filteredProducts, 'csv')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as CSV"
+          >
+            📊 CSV
+          </button>
+          <button
+            onClick={() => exportProducts(filteredProducts, 'xlsx')}
+            className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
+            title="Export as Excel"
+          >
+            📋 Excel
+          </button>
+          {canEdit && (
+              <button onClick={() => openModal('add')} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
+              Add Product
+              </button>
+          )}
+        </div>
       </div>
 
       <Card>
@@ -389,9 +479,13 @@ export const Products: React.FC = () => {
             <button onClick={closeModal} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
                 Cancel
             </button>
-            <button onClick={handleSave} type="button" className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700">
+            <LoadingButton 
+                isLoading={isLoading('save')}
+                onClick={handleSave}
+                className="text-white bg-blue-600 hover:bg-blue-700 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700"
+            >
                 {modalMode === 'add' ? 'Save Product' : 'Save Changes'}
-            </button>
+            </LoadingButton>
         </div>
       </Modal>
 
@@ -404,9 +498,13 @@ export const Products: React.FC = () => {
                 <button onClick={closeDeleteConfirm} type="button" className="text-slate-500 bg-white hover:bg-slate-100 focus:ring-4 focus:outline-none focus:ring-blue-300 rounded-lg border border-slate-200 text-sm font-medium px-5 py-2.5 hover:text-slate-900 focus:z-10 dark:bg-slate-700 dark:text-slate-300 dark:border-slate-500 dark:hover:text-white dark:hover:bg-slate-600">
                     Cancel
                 </button>
-                <button onClick={handleDelete} type="button" className="text-white bg-red-600 hover:bg-red-700 focus:ring-4 focus:outline-none focus:ring-red-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-red-600 dark:hover:bg-red-700">
+                <LoadingButton 
+                    isLoading={isLoading('delete')}
+                    onClick={handleDelete}
+                    className="text-white bg-red-600 hover:bg-red-700 focus:ring-4 focus:outline-none focus:ring-red-300 font-medium rounded-lg text-sm px-5 py-2.5 text-center dark:bg-red-600 dark:hover:bg-red-700"
+                >
                     Delete
-                </button>
+                </LoadingButton>
             </div>
         </Modal>
     </div>
