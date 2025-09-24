@@ -35,6 +35,7 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children }
       <div
         className="relative bg-white dark:bg-slate-800 rounded-xl shadow-xl w-full max-w-2xl m-4 transform transition-all"
         onClick={(e) => e.stopPropagation()}
+        style={{ height: '90%', overflow: 'auto' }}
       >
         <div className="flex items-start justify-between p-4 border-b rounded-t dark:border-slate-600">
           <h3 className="text-xl font-semibold text-slate-900 dark:text-white" id="modal-title">
